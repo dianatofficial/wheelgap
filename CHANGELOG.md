@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `--explain --suggest` now formats suggestions as a Markdown list when combined with `--markdown`, placed below the `<details>` block for rejected wheels. (`--markdown --suggest` without `--explain` remains an error.) (#336)
+- `--explain --suggest` now formats suggestions as a Markdown list when combined with `--markdown`, placed below the `<details>` block for rejected wheels. (`--markdown --suggest` without `--explain` remains an error.) (#347, thanks [@dianatofficial](https://github.com/dianatofficial))
 - `--dockerfile` now says `ARG PY has an empty default, pass -p/-t instead` for an `ARG PY=` that the final image's `FROM` uses, instead of claiming the syntax is wrong, and reports an ARG value with a non-ASCII character (such as the no-break space Docker splits an ARG on) as unreadable, instead of reading it as one value and failing later with `invalid tag`. (#335, thanks [@bfs2021](https://github.com/bfs2021))
 
 ## 0.10.0 (2026-11-15)
