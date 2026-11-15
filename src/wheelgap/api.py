@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import sys
 import sysconfig
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
+from types import MappingProxyType
+from typing import ClassVar
 
 from .check import Row, Status, check, explain, explain_lines, status_for, wheel_tags
 from .offline import require_offline
@@ -75,8 +77,8 @@ class Result:
     statuses: dict[Target, Status] = field(default_factory=dict)
     files: tuple[str, ...] = ()
     error: str | None = None
-    # With pyodide_locks: the version Pyodide ships, set when any target is BUNDLED, and whether it's outside the
-    # pin or range asked for (it still counts as ok, as in the CLI).
+    # With pyodide_locks: a shared version when all applicable locks agree, plus whether any bundled
+    # version is outside the requested pin or range (the package still counts as ok).
     bundled_version: str | None = None
     bundled_version_differs: bool = False
     # Per SOURCE or MISSING target, the dependency path from a root down to this package, as --explain shows it:
@@ -89,7 +91,10 @@ class Result:
     requires_python_rejected: dict[str, str] = field(default_factory=dict)
     no_binary: bool = False
     only_binary: bool = False
-    _resolutions: dict[str, Package] = field(default_factory=dict, repr=False, compare=False)
+    # _result installs per-instance data; the immutable default is not a public dataclass field.
+    _resolutions: ClassVar[Mapping[str, Package]] = MappingProxyType({})
+    # Each applicable Pyodide lock may ship a different version for its Python.
+    bundled_versions: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -156,8 +161,11 @@ class Result:
             "error": self.error,
             "results": {t.label(True): s.value for t, s in self.statuses.items()},
         }
-        if self.bundled_version is not None:  # the same keys as the CLI's --json
+        if self.bundled_version is not None:
             out["bundled"] = self.bundled_version
+        if self.bundled_versions:
+            out["bundled_versions"] = dict(self.bundled_versions)
+        if self.bundled_version is not None or self.bundled_versions:
             out["bundled_version_differs"] = self.bundled_version_differs
         if explain:
             out["rejected"] = {
@@ -178,16 +186,19 @@ def _result(
     statuses = {
         t: Status.BUNDLED if any(bundles(lock, pkg.key, t, s) for lock in applied) else s for t, s in statuses.items()
     }
+    bundled_versions = {f"{lock.python[0]}.{lock.python[1]}": lock.packages[pkg.key] for lock in applied}
+    unique_versions = set(bundled_versions.values())
+    shared_version = next(iter(unique_versions)) if len(unique_versions) == 1 else None
     via = via or {}
-    return Result(
+    result = Result(
         pkg.name,
         pkg.version,
         statuses,
         tuple(dict.fromkeys(f for variant in pkg.variants for f in variant.files or ())),
         # With several Pythons, a lookup that went wrong records its error on each resolution, not on pkg.
         pkg.error or next((variant.error for variant in pkg.variants if variant.error), None),
-        # Locks for different Pythons can ship different versions: report the first, and a difference in any.
-        applied[0].packages[pkg.key] if applied else None,
+        # Preserve the legacy scalar only when all applied locks agree.
+        shared_version,
         any(bundled_version_differs(pkg, lock) for lock in applied),
         {t: tuple(via[t]) for t, s in statuses.items() if s in _EXPLAINED and t in via},
         # A file's yanked flag and its Requires-Python reason are the same for every Python, so these are the union.
@@ -195,8 +206,10 @@ def _result(
         {f: why for variant in pkg.variants for f, why in variant.requires_python_rejected.items()},
         pkg.no_binary,
         pkg.only_binary,
-        pkg.resolutions,
+        bundled_versions=bundled_versions,
     )
+    object.__setattr__(result, "_resolutions", pkg.resolutions)
+    return result
 
 
 def _package_targets(targets: Sequence[Target] | None) -> list[Target]:
@@ -219,8 +232,9 @@ def check_packages(
     pyodide_locks (from wheelgap.pyodide.load_pyodide_lock, one per Python) mark a package that a lock's Pyodide
     ships itself as BUNDLED on pyodide targets for that lock's Python, where it would otherwise be SOURCE or MISSING.
     As with --pyodide-lock, a lock whose Python no pyodide target uses raises PyodideLockError (a ValueError) before
-    any lookup, and so do two locks for the same Python. A result with a BUNDLED target has bundled_version (the
-    version Pyodide ships) and bundled_version_differs (True when that's outside the pin or range asked for).
+    any lookup, and so do two locks for the same Python. A result with a BUNDLED target has
+    bundled_versions (one version per Python), bundled_version (only when all applicable locks agree) and
+    bundled_version_differs (True if any bundled version is outside the requested pin or range).
     """
     targets = _package_targets(targets)
     pyodide_locks = tuple(pyodide_locks)

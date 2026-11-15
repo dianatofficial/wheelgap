@@ -128,6 +128,38 @@ psycopg2 2.9.10: note from the wheelgap tracker for linux-x86_64 (alternative, c
   that can't be fetched, or a package the tracker doesn't list, adds nothing, and the exit status never depends on
   notes.
 
+### Build lab results {#build-lab}
+
+**After 0.10.0.** The tracker's weekly [build lab](https://wheelgap.github.io/tracker/) builds popular packages that
+have no wheel for a platform from their PyPI sdist on that platform, on GitHub's runners, then installs and imports the
+result, and on free-threaded Python checks whether importing it turned the GIL back on. With `--explain --notes`, a
+`source` cell gets one line after the package's notes when the lab built **exactly the checked version** for
+**exactly that target**:
+
+```text
+pkg 1.0 on win-arm64: build lab (2026-11-15, windows-11-arm, Python 3.14.2): builds from source in 87 s and imports
+```
+
+- The verdict is one of: `builds from source in 87 s and imports` (with `, GIL stays off` on free-threaded Python),
+  `builds in 87 s, but importing it turns the GIL back on`, `builds in 87 s as pure Python, with no compiled
+  extension module (if it has an optional one, that was skipped)`, `builds in 87 s, but with no compiled extension module`, `builds in 87 s, but doesn't import`,
+  `builds in 87 s, but its dependencies don't install`, `fails to build: needs a Rust toolchain` (or another
+  reason) and `didn't finish building in 40 min`. A wheel with no extension module is never called a working build.
+- These are the lab's dated observations on GitHub's runners, with the runner and Python they used, not a promise
+  about your machine. The runners have compilers and many system libraries preinstalled, so a build that works there
+  can still need setup on your machine: a package that needs a C library's headers, such as libpq's, may find them
+  already there. Nothing the lab built is downloaded: the results come in the same small file as the notes, so they
+  add no request, and follow the same rules (opt-in, names known to be PyPI's only, the cache, the timeouts).
+- A result for another release, or for another target (the free-threaded build says nothing about the regular one),
+  shows nothing. The tracker builds its latest release, which may not be yours.
+- With `--json --explain`, each package gets a `build_lab` object, keyed by target label like `rejected`, with the
+  lab's fields (`target`, `version`, `outcome`, `seconds`, `wheel`, `extensions`, `import`, `gil`, `reason`,
+  `excerpt`, `toolchains`, `runner`, `python`, `date`) and the `verdict` above; it's empty without `--notes` or when
+  there's no result. `--markdown` puts the lines with the notes.
+- The results come from a public repository too, so wheelgap reads them as strictly as the tracker's own checker and
+  drops any result that isn't exactly in its format, without hiding the notes (or the other way round). Treat
+  `excerpt` as untrusted plain text. The exit status never depends on them.
+
 ### Build requirements {#build-info}
 
 With `--build-info` (or `build-info = true` in `[tool.wheelgap]`), `--explain` also says what each `source` build

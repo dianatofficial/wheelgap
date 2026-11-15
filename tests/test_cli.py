@@ -2223,6 +2223,7 @@ def _assert_matches_output_schema(data):
             "via",
             "build_requires",
             "notes",
+            "build_lab",
             "bundled",
             "bundled_version_differs",
             "conda_forge",
@@ -2254,6 +2255,8 @@ def _assert_matches_output_schema(data):
             assert all(pkg["conda_forge"]["builds"].values())
         for note in pkg.get("notes", []):
             assert set(note["targets"]) <= set(pkg.get("rejected", {})), "notes cover gap targets only"
+        for label, result in pkg.get("build_lab", {}).items():  # source cells only, for the checked release
+            assert pkg["results"][label] == "source" and result["version"] == pkg["version"]
         if "suggest" in pkg:  # a release for some of the targets in rejected
             assert set(pkg["suggest"]) <= set(pkg["rejected"]) and all(
                 isinstance(v, str) for v in pkg["suggest"].values()
@@ -2337,6 +2340,82 @@ def test_json_build_info_matches_schema(capsys, tmp_path, fake_pypi, fake_files)
     data = json.loads(out)
     _assert_matches_output_schema(data)
     assert {p["name"]: p["build_requires"] for p in data["packages"]} == {"fastlib": None, "nowheels": ["maturin>=1"]}
+
+
+def test_json_build_lab_matches_schema(capsys, tmp_path, tracker):
+    """--json --explain --notes: the tracker's build lab results, by target label, with each verdict."""
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\nrequires-python = ">=3.13"\n\n[[package]]\nname = "pkg"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/pkg-1.0.tar.gz", hash = "sha256:00", size = 1 }\n',
+        encoding="utf-8",
+    )
+    common = {"version": "1.0", "runner": "windows-11-arm", "date": "2026-11-15", "toolchains": ["cl"]}
+    built = {"outcome": "built", "seconds": 87, "excerpt": "", "reason": None}
+    regular = {
+        **common,
+        **built,
+        "target": "3.14 win-arm64",
+        "python": "3.14.2",
+        "wheel": "py3-none-any",
+        "extensions": 0,
+        "import": "ok",
+        "gil": None,
+    }
+    free = {
+        **common,
+        **built,
+        "target": "3.14t win-arm64",
+        "python": "3.14.2t",
+        "wheel": "cp314-cp314t-win_arm64",
+        "extensions": 2,
+        "import": "ok",
+        "gil": "re-enabled",
+    }
+    failed = {
+        **common,
+        "runner": "ubuntu-24.04",
+        "target": "3.14 linux-x86_64",
+        "python": "3.14.2",
+        "outcome": "failed",
+        "seconds": 12,
+        "wheel": None,
+        "extensions": None,
+        "import": None,
+        "gil": None,
+        "reason": "needs OpenSSL",
+        "excerpt": "fatal error: openssl/ssl.h: No such file or directory",
+    }
+    tracker.files["pkg"] = {
+        "schema": 1,
+        "name": "pkg",
+        "version": "1.0",
+        "notes": [],
+        "builds": [regular, free, failed],
+    }
+    args = [str(tmp_path), "-p", "3.14,3.14t", "-t", "win-arm64,linux-x86_64", "--json", "--explain", "--notes"]
+    code, out, err = run(capsys, *args)
+    assert code == 1 and not err
+    data = json.loads(out)
+    _assert_matches_output_schema(data)
+    assert data["packages"][0]["build_lab"] == {
+        "3.14 win-arm64": {
+            **regular,
+            "verdict": (
+                "builds in 87 s as pure Python, with no compiled extension module "
+                "(if it has an optional one, that was skipped)"
+            ),
+        },
+        "3.14t win-arm64": {**free, "verdict": "builds in 87 s, but importing it turns the GIL back on"},
+        "3.14 linux-x86_64": {**failed, "verdict": "fails to build: needs OpenSSL"},
+    }
+    # The schema rejects a result in another shape.
+    schema = json.loads(OUTPUT_SCHEMA.read_text(encoding="utf-8"))
+    entry = data["packages"][0]["build_lab"]["3.14 win-arm64"]
+    lab = schema["$defs"]["package"]["properties"]["build_lab"]
+    for bad in ({**entry, "outcome": "maybe"}, {**entry, "seconds": -1}, {**entry, "extra": 1}):
+        with pytest.raises(AssertionError):
+            _check_schema({"3.14 win-arm64": bad}, lab, schema)
 
 
 def test_json_output_with_pyodide_lock_matches_schema(capsys, fixtures, fake_pypi):

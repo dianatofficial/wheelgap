@@ -210,8 +210,11 @@ class FakeTracker:
         self.options: list[tuple[float, int]] = []  # (timeout, attempts) of each request
         self.respond = None  # a function of the name that answers instead (it may raise or sleep)
 
-    def add(self, name: str, *notes: dict, version: str = "1.0") -> None:
+    def add(self, name: str, *notes: dict, version: str = "1.0", builds: object = None) -> None:
+        """A package file with these notes and, unless `builds` is None, these build lab results."""
         self.files[name] = {"schema": 1, "name": name, "version": version, "notes": list(notes)}
+        if builds is not None:
+            self.files[name]["builds"] = builds
 
     def fetch_json(self, url, timeout, attempts):
         import urllib.error

@@ -196,6 +196,10 @@ package with a gap, such as a binary package to use instead. It sends the names 
 wheelgap.github.io, so it's opt-in, and only for names that pass [the PyPI-origin rule](how-it-works.md#pypi-origin);
 never with `--offline`, `--index-url` or a `WHEELGAP_INDEX_URL` mirror. `notes = true` in `[tool.wheelgap]` turns it
 on by default, and `--no-notes` turns it off for one run. See [Tracker notes](output.md#notes).
+**After 0.10.0**, it also shows the tracker's [build lab results](output.md#build-lab) for a `source` cell, from the
+same file: whether exactly that release built from its sdist and imported on GitHub's runners for that target. They're
+the lab's dated observations on GitHub's runners, which have compilers and many system libraries preinstalled, so a
+build that works there can still need setup on your machine. Nothing the lab built is downloaded.
 
 ### `--build-info` {#build-info}
 

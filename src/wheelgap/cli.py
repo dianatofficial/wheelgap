@@ -618,6 +618,9 @@ def gap_targets(row: Row, targets: list[Target]) -> list[Target]:
 
 RowNotes = dict[int, list[tuple[tracker.Note, list[Target]]]]
 """The tracker's notes that apply to a row's gaps, keyed by id(row), each with the gap targets it covers."""
+RowBuilds = dict[int, list[tuple[Target, tracker.Build]]]
+"""The tracker's build lab results for a row's `source` cells, keyed by id(row): one per target at most, for exactly
+the checked release."""
 Suggestions = dict[int, release_suggest.Suggestion]
 """--suggest: by id() of a gap row's package that was looked up, the release it names for each gap target that has
 one (see release_suggest.suggest)."""
@@ -644,25 +647,29 @@ def tracker_notes(
     read_cache: bool,
     write_cache: bool,
     private: frozenset[str] = frozenset(),
-) -> tuple[RowNotes, str | None]:
-    """--explain --notes: the coverage tracker's notes for each row with a gap, and why the lookups were cut short,
-    if they were (see tracker.lookup).
+) -> tuple[RowNotes, RowBuilds, str | None]:
+    """--explain --notes: the coverage tracker's notes and build lab results for each row with a gap, and why the
+    lookups were cut short, if they were (see tracker.lookup).
 
     Only names positively from PyPI are looked up (notes_eligible). A note is kept for the gap targets on its
     platforms (and its Pythons, if it lists any: Note.covers), and only when it's about the checked release
-    (Note.applies_to): the tracker checked its latest release, which may not be yours.
+    (Note.applies_to): the tracker checked its latest release, which may not be yours. A build lab result is kept for
+    a `source` cell only when it's for exactly that target and exactly the checked version (Build.covers).
     """
     eligible = [r for r in rows if notes_eligible(r, targets, source_of, private)]
-    found, cut = tracker.lookup([r.package.key for r in eligible], read_cache, write_cache)
+    found, built, cut = tracker.lookup([r.package.key for r in eligible], read_cache, write_cache)
     out: RowNotes = {}
+    lab: RowBuilds = {}
     for r in eligible:
-        if r.package.key not in found:
-            continue
-        gaps = gap_targets(r, targets)
-        matched = [(note, [t for t in gaps if note.covers(t)]) for note in found[r.package.key]]
-        if kept := [(note, ts) for note, ts in matched if ts and note.applies_to(r.package.version)]:
-            out[id(r)] = kept
-    return out, cut
+        if r.package.key in found:
+            gaps = gap_targets(r, targets)
+            matched = [(note, [t for t in gaps if note.covers(t)]) for note in found[r.package.key]]
+            if kept := [(note, ts) for note, ts in matched if ts and note.applies_to(r.package.version)]:
+                out[id(r)] = kept
+        results = built.get(r.package.key, [])
+        if hits := [(t, b) for t in source_targets(r, targets) for b in results if b.covers(t, r.package.version)]:
+            lab[id(r)] = hits
+    return out, lab, cut
 
 
 def source_targets(row: Row, targets: list[Target]) -> list[Target]:
@@ -678,9 +685,10 @@ def render_explain(
     notes: RowNotes | None = None,
     build_info: dict[int, BuildInfo] | None = None,
     suggestions: Suggestions | None = None,
+    builds: RowBuilds | None = None,
 ) -> list[str]:
     """`conda_forge`: --conda-forge hints, `build_info`: --build-info answers and `suggestions`: --suggest's, by id()
-    of the row's package. `notes`: --notes, by id() of the row."""
+    of the row's package. `notes` and `builds` (the tracker's build lab results): --notes, by id() of the row."""
     multi_py = len({t.python for t in targets}) > 1
     out = []
     for r in rows:
@@ -722,6 +730,13 @@ def render_explain(
             out.append(f"{style.bold(head)} {style.dim(f'({note.kind}, checked {note.updated})')}")
             out.append(f"  - {note.text}")
             out += [f"    {link}" for link in note.links]
+            out.append("")
+        if lab := (builds or {}).get(id(r), []):
+            # Every part is from a fixed vocabulary or a strict pattern (tracker.Build), so it's printed as is.
+            for t, b in lab:
+                head = f"{r.package.name} {r.package.version or '?'} on {t.label(multi_py)}:"
+                where = style.dim(f"({b.date}, {b.runner}, Python {b.python})")
+                out.append(f"{style.bold(head)} build lab {where}: {b.verdict()}")
             out.append("")
         if suggestions is not None and (found := suggestions.get(id(r.package))) is not None:
             gaps = gap_targets(r, targets)
@@ -815,6 +830,7 @@ def report_json(
     notes: RowNotes | None = None,
     build_info: dict[int, BuildInfo] | None = None,
     suggestions: Suggestions | None = None,
+    builds: RowBuilds | None = None,
 ) -> str:
     multi_py = len({t.python for t in targets}) > 1
     gaps = [r for r in rows if not r.ok]
@@ -858,6 +874,10 @@ def report_json(
                 {**note.as_json(), "targets": [t.label(multi_py) for t in ts]}
                 for note, ts in (notes or {}).get(id(r), [])
             ]
+            # The tracker's build lab results for this package's source cells, by target label.
+            out["build_lab"] = {
+                t.label(multi_py): {**b.as_json(), "verdict": b.verdict()} for t, b in (builds or {}).get(id(r), [])
+            }
             if build_info is not None:  # --build-info: what the sdist requires, on the targets that build it
                 info, sources = build_info.get(id(r.package)), source_targets(r, targets)
                 out["build_requires"] = [shown(q) for q in requires_for(info, sources)] if info and sources else None
@@ -1073,6 +1093,8 @@ def render_markdown(
     conda_forge: dict[int, condaforge.Hint] | None = None,
     notes: RowNotes | None = None,
     build_info: dict[int, BuildInfo] | None = None,
+    builds: RowBuilds | None = None,
+    *,
     suggestions: Suggestions | None = None,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
@@ -1136,7 +1158,7 @@ def render_markdown(
     if args.explain and gaps:
         # Fenced, so wheel filenames, reasons and the tracker's notes need no escaping: inside a code block, Markdown
         # and HTML are shown as text. The fence is longer than any run of backticks in it, so nothing can close it.
-        lines = render_explain(gaps, targets, plain, conda_forge, notes, build_info)
+        lines = render_explain(gaps, targets, plain, conda_forge, notes, build_info, builds=builds)
         fence = "`" * max([3, *(len(run) + 1 for line in lines for run in re.findall(r"`+", line))])
         out += ["<details><summary>Why (rejected wheels)</summary>", "", fence, *lines, fence, "", "</details>", ""]
         if suggestions:
@@ -1768,6 +1790,7 @@ def _main(argv: list[str]) -> int:
     gaps = [r for r in rows if not r.ok]
     source_labels = [s.label for s in sources]
     row_notes: RowNotes = {}
+    row_builds: RowBuilds = {}
     # Opt-in, since it sends package names to wheelgap.github.io: --explain on a lockfile makes no requests by default.
     # Never offline, nor when packages come from another index (--index-url, a WHEELGAP_INDEX_URL mirror).
     notes_asked = args.notes if args.notes is not None else config.get("notes")
@@ -1784,7 +1807,7 @@ def _main(argv: list[str]) -> int:
     elif args.explain and gaps and not notes_off:
         private = origin.private_names(sources, simple_index=index_url)
         if notes_asked:
-            row_notes, cut = tracker_notes(gaps, targets, source_of, private=private, **cached)
+            row_notes, row_builds, cut = tracker_notes(gaps, targets, source_of, private=private, **cached)
             if cut and not quiet:
                 why = (
                     "wheelgap.github.io didn't answer in time"
@@ -1861,6 +1884,7 @@ def _main(argv: list[str]) -> int:
                 row_notes,
                 build_info,
                 suggestions,
+                row_builds,
             )
         )
         return code
@@ -1881,7 +1905,8 @@ def _main(argv: list[str]) -> int:
                     conda_forge,
                     row_notes,
                     build_info,
-                    suggestions,
+                    row_builds,
+                    suggestions=suggestions,
                 )
             )
         )
@@ -1928,7 +1953,7 @@ def _main(argv: list[str]) -> int:
         if args.explain and gaps:
             if hidden:
                 print()
-            for ln in render_explain(gaps, targets, style, conda_forge, row_notes, build_info, suggestions):
+            for ln in render_explain(gaps, targets, style, conda_forge, row_notes, build_info, suggestions, row_builds):
                 print(ln)
 
     bundled = [r for r in rows if Status.BUNDLED in r.results.values()]
