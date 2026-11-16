@@ -86,6 +86,9 @@ class Package:
     only_binary: bool = False
     # The relevant uv setting(s), used to explain a gap caused by the configured policy.
     install_policy: str | None = None
+    # PyPI project metadata URLs (project_urls and home_page).
+    project_urls: dict[str, str] | None = None
+    home_page: str | None = None
 
     @property
     def key(self) -> str:

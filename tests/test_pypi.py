@@ -769,3 +769,39 @@ def test_pin_requires_python_reason_only_for_wheels_the_target_fits():
     reasons = dict(explain([], target, frozenset(), dict.fromkeys((fits, other), "requires Python >=3.10")))
     assert reasons[fits] == "requires Python >=3.10"
     assert reasons[other] != "requires Python >=3.10"
+
+
+def test_extract_issues_url_issue_tracker_keys():
+    assert (
+        pypi.extract_issues_url({"Issues": "https://github.com/org/repo/issues"})
+        == "https://github.com/org/repo/issues"
+    )
+    assert (
+        pypi.extract_issues_url({"Bug Tracker": "https://bugs.example.com/project"})
+        == "https://bugs.example.com/project"
+    )
+    assert (
+        pypi.extract_issues_url({"tracker": "https://tracker.debian.org/pkg/demo"})
+        == "https://tracker.debian.org/pkg/demo"
+    )
+    assert (
+        pypi.extract_issues_url({"Bugs": "https://github.com/org/repo/issues"}) == "https://github.com/org/repo/issues"
+    )
+
+
+def test_extract_issues_url_github_fallback():
+    assert pypi.extract_issues_url({"Source": "https://github.com/org/repo"}) == "https://github.com/org/repo/issues"
+    assert (
+        pypi.extract_issues_url({"Repository": "https://github.com/org/repo.git"})
+        == "https://github.com/org/repo/issues"
+    )
+    assert pypi.extract_issues_url(None, homepage="https://github.com/org/repo") == "https://github.com/org/repo/issues"
+
+
+def test_extract_issues_url_rejects_insecure_and_invalid():
+    assert pypi.extract_issues_url({"Issues": "http://insecure.example.com/issues"}) is None
+    assert pypi.extract_issues_url({"Source": "http://github.com/org/repo"}) is None
+    assert pypi.extract_issues_url({"Homepage": "https://example.com/not-github"}) is None
+    assert pypi.extract_issues_url(None, homepage="https://example.com/blog") is None
+    assert pypi.extract_issues_url({}) is None
+    assert pypi.extract_issues_url(None, None) is None

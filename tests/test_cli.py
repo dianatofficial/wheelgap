@@ -2221,6 +2221,7 @@ def _assert_matches_output_schema(data):
             "results",
             "rejected",
             "via",
+            "issues_url",
             "build_requires",
             "notes",
             "build_lab",
@@ -2248,6 +2249,8 @@ def _assert_matches_output_schema(data):
             for label, path in pkg["via"].items():
                 assert label in labels
                 assert isinstance(path, list) and all(isinstance(s, str) for s in path)
+        if "issues_url" in pkg:
+            assert pkg["issues_url"] is None or isinstance(pkg["issues_url"], str)
         if "build_requires" in pkg:
             reqs = pkg["build_requires"]
             assert reqs is None or (isinstance(reqs, list) and all(isinstance(r, str) for r in reqs))
@@ -3651,3 +3654,42 @@ def test_uv_build_policy_changes_cli_status_and_explanation(
     output = capsys.readouterr().out
     assert policy_label in output
     assert fake_pypi == []
+
+
+def test_explain_issues_url_text_output(capsys, fake_pypi):
+    code, out, _ = run(capsys, "gapwithissues==1.0", "-p", "3.13", "-t", "linux-x86_64", "--explain")
+    assert code == 1
+    assert "ask for a wheel: https://github.com/example/gapwithissues/issues" in out
+
+
+def test_explain_issues_url_markdown_output(capsys, fake_pypi):
+    code, out, _ = run(capsys, "gapwithissues==1.0", "-p", "3.13", "-t", "linux-x86_64", "--markdown", "--explain")
+    assert code == 1
+    assert "<details><summary>Why (rejected wheels)</summary>" in out
+    assert "ask for a wheel: https://github.com/example/gapwithissues/issues" in out
+
+
+def test_explain_issues_url_json_output(capsys, fake_pypi):
+    code, out, _ = run(capsys, "gapwithissues==1.0", "-p", "3.13", "-t", "linux-x86_64", "--json", "--explain")
+    assert code == 1
+    data = json.loads(out)
+    pkg = next(p for p in data["packages"] if p["name"] == "gapwithissues")
+    assert pkg["issues_url"] == "https://github.com/example/gapwithissues/issues"
+
+
+def test_explain_issues_url_homepage_fallback(capsys, fake_pypi):
+    code, out, _ = run(capsys, "gapwithhome==1.0", "-p", "3.13", "-t", "linux-x86_64", "--explain")
+    assert code == 1
+    assert "ask for a wheel: https://github.com/example/gapwithhome/issues" in out
+
+
+def test_explain_issues_url_insecure_is_rejected(capsys, fake_pypi):
+    code, out, _ = run(capsys, "gapinsecure==1.0", "-p", "3.13", "-t", "linux-x86_64", "--explain")
+    assert code == 1
+    assert "ask for a wheel:" not in out
+
+    code, out, _ = run(capsys, "gapinsecure==1.0", "-p", "3.13", "-t", "linux-x86_64", "--json", "--explain")
+    assert code == 1
+    data = json.loads(out)
+    pkg = next(p for p in data["packages"] if p["name"] == "gapinsecure")
+    assert pkg["issues_url"] is None

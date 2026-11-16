@@ -277,6 +277,56 @@ def fetch_releases(key: str, timeout: float = 10.0, deadline: float | None = Non
     return releases
 
 
+_ISSUE_KEYS = ("issues", "issue tracker", "bug tracker", "tracker", "bugs", "bug reports", "issue reports")
+_REPO_KEYS = ("source", "source code", "code", "repository", "homepage", "home")
+
+
+def extract_issues_url(project_urls: dict[str, str] | None, homepage: str | None = None) -> str | None:
+    """Extract an HTTPS issue tracker URL from PyPI metadata.
+
+    Reads `project_urls` case-insensitively, preferring issue tracker keys (Issues, Bug Tracker, Tracker).
+    Falls back to a GitHub Source/Homepage URL with `/issues` added.
+    Refuses any URL that is not an https:// URL.
+    """
+    lower_urls: dict[str, str] = {}
+    if project_urls and isinstance(project_urls, dict):
+        lower_urls = {
+            k.strip().lower(): v for k, v in project_urls.items() if isinstance(k, str) and isinstance(v, str)
+        }
+        for target_key in _ISSUE_KEYS:
+            if target_key in lower_urls:
+                candidate = lower_urls[target_key].strip()
+                if not candidate:
+                    continue
+                parsed = urlsplit(candidate)
+                if parsed.scheme == "https" and parsed.netloc and not any(c.isspace() for c in candidate):
+                    return candidate
+
+    repo_candidates: list[str] = []
+    for rk in _REPO_KEYS:
+        if rk in lower_urls:
+            repo_candidates.append(lower_urls[rk])
+    if homepage and isinstance(homepage, str):
+        repo_candidates.append(homepage)
+
+    for cand in repo_candidates:
+        if not cand:
+            continue
+        candidate = cand.strip()
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme == "https"
+            and parsed.netloc.lower() in ("github.com", "www.github.com")
+            and not any(c.isspace() for c in candidate)
+        ):
+            segments = [s for s in parsed.path.strip("/").split("/") if s]
+            if len(segments) >= 2:
+                owner, repo = segments[0], segments[1].removesuffix(".git")
+                return f"https://github.com/{owner}/{repo}/issues"
+
+    return None
+
+
 # --explain --build-info reads sdists (see build.py). Past any of these caps an sdist gives no answer.
 SDIST_MAX_BYTES = 64 * 1024 * 1024  # downloaded (numpy's sdist is 19 MiB)
 SDIST_MAX_UNPACKED = 512 * 1024 * 1024  # of tar unpacked from them
@@ -788,6 +838,8 @@ def fill(
     # Only a pinned release is cached: the latest release, or a range's pick, can change at any upload.
     key = (base, pkg.key, pkg.version) if pkg.version else None
     cached = cache.load_files(*key) if key and read_cache else None
+    if key and read_cache and cached is not None:
+        pkg.project_urls, pkg.home_page = cache.load_project_urls(*key)
     try:
         data = {"urls": cached} if cached is not None else fetch_json(url)
     except urllib.error.HTTPError as e:
@@ -802,6 +854,7 @@ def fill(
     valid = not any(p.error for p in pkg.variants) and isinstance(data, dict) and isinstance(data.get("urls"), list)
     if key and write_cache and cached is None and valid:
         cache.save_files(*key, _files(data["urls"]))
+        cache.save_project_urls(*key, pkg.project_urls, pkg.home_page)
     return pkg
 
 
@@ -845,6 +898,16 @@ def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> 
     try:
         if not isinstance(data, dict):
             raise ValueError("not an object")
+        info = data.get("info")
+        if isinstance(info, dict):
+            if isinstance(info.get("project_urls"), dict):
+                pkg.project_urls = {
+                    str(k): str(v) for k, v in info["project_urls"].items() if isinstance(k, str) and isinstance(v, str)
+                }
+            elif isinstance(info.get("home_page"), str):
+                pkg.project_urls = {"Homepage": info["home_page"]}
+            if isinstance(info.get("home_page"), str):
+                pkg.home_page = info["home_page"]
         if not pinned and pkg.spec:
             # A range (numpy>=1.26,<2): check the release an installer would pick, not the latest.
             found = _newest_matching(data, pkg.spec, python)

@@ -97,6 +97,18 @@ FAKE_INDEX = {
             "distpkg-1.0.tar.gz",
         ],
     },
+    "gapwithissues": {
+        "1.0": ["gapwithissues-1.0.tar.gz"],
+        "_project_urls": {"Issues": "https://github.com/example/gapwithissues/issues"},
+    },
+    "gapwithhome": {
+        "1.0": ["gapwithhome-1.0.tar.gz"],
+        "_home_page": "https://github.com/example/gapwithhome",
+    },
+    "gapinsecure": {
+        "1.0": ["gapinsecure-1.0.tar.gz"],
+        "_project_urls": {"Issues": "http://insecure.example.com/issues"},
+    },
 }
 
 
@@ -287,7 +299,8 @@ def fake_pypi(monkeypatch, tracker):
         if name not in FAKE_INDEX:
             raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
         versions = FAKE_INDEX[name]
-        version = parts[1] if len(parts) > 1 else next(reversed(versions))
+        version_keys = [v for v in versions if not v.startswith("_")]
+        version = parts[1] if len(parts) > 1 else (version_keys[-1] if version_keys else "1.0")
         files = versions.get(version)
         if files is None:
             raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
@@ -299,9 +312,14 @@ def fake_pypi(monkeypatch, tracker):
                 for e in (f if isinstance(f, dict) else {"filename": f} for f in fs)
             ]
 
-        data = {"info": {"version": version}, "urls": entries(files)}
+        info = {"version": version}
+        if "_project_urls" in versions:
+            info["project_urls"] = versions["_project_urls"]
+        if "_home_page" in versions:
+            info["home_page"] = versions["_home_page"]
+        data = {"info": info, "urls": entries(files)}
         if len(parts) == 1:  # the project endpoint lists every release, like PyPI
-            data["releases"] = {v: entries(fs) for v, fs in versions.items()}
+            data["releases"] = {v: entries(fs) for v, fs in versions.items() if not v.startswith("_")}
         return data
 
     monkeypatch.setattr(pypi, "fetch_json", fetch_json)

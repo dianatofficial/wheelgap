@@ -19,7 +19,7 @@ from packaging.markers import InvalidMarker, Marker
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 
-from . import __version__, cache, condaforge, origin
+from . import __version__, cache, condaforge, origin, pypi
 from . import notes as tracker
 from . import suggest as release_suggest
 from .api import running_python
@@ -733,6 +733,8 @@ def render_explain(
     build_info: dict[int, BuildInfo] | None = None,
     suggestions: Suggestions | None = None,
     builds: RowBuilds | None = None,
+    issues_urls: dict[int, str | None] | None = None,
+    markdown: bool = False,
 ) -> list[str]:
     """`conda_forge`: --conda-forge hints, `build_info`: --build-info answers and `suggestions`: --suggest's, by id()
     of the row's package. `notes` and `builds` (the tracker's build lab results): --notes, by id() of the row."""
@@ -767,6 +769,9 @@ def render_explain(
                 only_binary=r.package.only_binary,
             )
             out += [f"  {line}" for line in lines]
+            if issues_urls and (url := issues_urls.get(id(r.package))):
+                rendered_url = _md(url) if markdown else url
+                out.append(f"  ask for a wheel: {rendered_url}")
             out.append("")
         if conda_forge and (h := conda_forge.get(id(r.package))):
             out += [condaforge.hint_text(r.package, h, multi_py), ""]
@@ -881,6 +886,7 @@ def report_json(
     suggestions: Suggestions | None = None,
     builds: RowBuilds | None = None,
     dropped: dict[str, str] | None = None,
+    issues_urls: dict[int, str | None] | None = None,
 ) -> str:
     multi_py = len({t.python for t in targets}) > 1
     gaps = [r for r in rows if not r.ok]
@@ -913,6 +919,8 @@ def report_json(
             }
             # Same targets as `rejected`, minus any without a path (inputs with no dependency graph).
             out["via"] = {t.label(multi_py): r.via[t] for t in gap_targets(r, targets) if t in r.via}
+            if issues_urls is not None:
+                out["issues_url"] = issues_urls.get(id(r.package))
             if conda_forge and (h := conda_forge.get(id(r.package))):
                 out["conda_forge"] = {
                     "name": h.name,
@@ -1154,6 +1162,7 @@ def render_markdown(
     *,
     suggestions: Suggestions | None = None,
     dropped: dict[str, str] | None = None,
+    issues_urls: dict[int, str | None] | None = None,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
     plain = Style(False)
@@ -1222,7 +1231,17 @@ def render_markdown(
     if args.explain and gaps:
         # Fenced, so wheel filenames, reasons and the tracker's notes need no escaping: inside a code block, Markdown
         # and HTML are shown as text. The fence is longer than any run of backticks in it, so nothing can close it.
-        lines = render_explain(gaps, targets, plain, conda_forge, notes, build_info, builds=builds)
+        lines = render_explain(
+            gaps,
+            targets,
+            plain,
+            conda_forge,
+            notes,
+            build_info,
+            builds=builds,
+            issues_urls=issues_urls,
+            markdown=True,
+        )
         fence = "`" * max([3, *(len(run) + 1 for line in lines for run in re.findall(r"`+", line))])
         out += ["<details><summary>Why (rejected wheels)</summary>", "", fence, *lines, fence, "", "</details>", ""]
         if suggestions:
@@ -1455,6 +1474,27 @@ def version_suggestions(
     return {
         id(r.package): s for key, rows in asked.items() if key in found for r, s in zip(rows, found[key], strict=True)
     }
+
+
+def explain_issues_urls(
+    rows: list[Row],
+    sources: list[Source],
+    index_url: str | None = None,
+) -> dict[int, str | None]:
+    """Issues tracker URLs for explained packages that pass the PyPI origin rule, by id(package)."""
+    if origin.other_index(index_url) is not None:
+        return {id(r.package): None for r in rows}
+    private = origin.private_names(sources, simple_index=index_url)
+    source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
+    out: dict[int, str | None] = {}
+    for r in rows:
+        pkg = r.package
+        src = source_of.get(id(pkg))
+        if src and origin.known_pypi(pkg, src, simple_index=index_url, private=private):
+            out[id(pkg)] = pypi.extract_issues_url(pkg.project_urls, pkg.home_page)
+        else:
+            out[id(pkg)] = None
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2070,6 +2110,8 @@ def _main(argv: list[str]) -> int:
         if stopped is not None and not quiet:
             print(Style(use_color(args.color)).dim(f"wheelgap: note: {stopped}"), file=sys.stderr)
 
+    issues_urls = explain_issues_urls(rows, sources, index_url) if args.explain else None
+
     if args.junit is not None:  # an empty PATH (an unset CI variable) is an error, not "no report"
         try:
             write_junit(args.junit, rows, targets, fail_on, advisory)
@@ -2121,6 +2163,7 @@ def _main(argv: list[str]) -> int:
                 suggestions,
                 row_builds,
                 dropped,
+                issues_urls=issues_urls,
             )
         )
         return code
@@ -2144,6 +2187,7 @@ def _main(argv: list[str]) -> int:
                     row_builds,
                     suggestions=suggestions,
                     dropped=dropped,
+                    issues_urls=issues_urls,
                 )
             )
         )
@@ -2193,7 +2237,17 @@ def _main(argv: list[str]) -> int:
         if args.explain and gaps:
             if hidden:
                 print()
-            for ln in render_explain(gaps, targets, style, conda_forge, row_notes, build_info, suggestions, row_builds):
+            for ln in render_explain(
+                gaps,
+                targets,
+                style,
+                conda_forge,
+                row_notes,
+                build_info,
+                suggestions,
+                row_builds,
+                issues_urls=issues_urls,
+            ):
                 print(ln)
 
     bundled = [r for r in rows if Status.BUNDLED in r.results.values()]

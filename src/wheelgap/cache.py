@@ -81,6 +81,34 @@ def save_files(index: str, name: str, version: str, files: list[dict]) -> None:
     _save(index, name, version, "files", kept)
 
 
+def _info_key(index: str) -> str:
+    return f"info-v1 {index}"
+
+
+def load_project_urls(index: str, name: str, version: str) -> tuple[dict[str, str] | None, str | None]:
+    """The cached project metadata URLs of a pinned release, or (None, None)."""
+    info = _load(_info_key(index), name, version, "info")
+    if isinstance(info, dict):
+        urls = info.get("project_urls")
+        home = info.get("home_page")
+        project_urls = (
+            {k: v for k, v in urls.items() if isinstance(k, str) and isinstance(v, str)}
+            if isinstance(urls, dict)
+            else None
+        )
+        home_page = home if isinstance(home, str) else None
+        return project_urls, home_page
+    return None, None
+
+
+def save_project_urls(
+    index: str, name: str, version: str, project_urls: dict[str, str] | None, home_page: str | None
+) -> None:
+    """Store a pinned release's project metadata URLs."""
+    if project_urls is not None or home_page is not None:
+        _save(_info_key(index), name, version, "info", {"project_urls": project_urls, "home_page": home_page})
+
+
 # --conda-forge entries: keyed apart from PyPI's, and versioned, since what's kept may change.
 CONDA_FORGE_KEY = "condaforge-v3 https://api.anaconda.org/package/conda-forge"
 TOO_LARGE = "too large"  # the answer was over condaforge.MAX_BYTES

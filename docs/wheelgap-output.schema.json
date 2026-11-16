@@ -152,6 +152,10 @@
                     "description": "Present with --explain: dependency path that installs the package, keyed by target label, for the same targets as rejected (uv.lock, and poetry.lock before lock-version 2.1). Empty object when the input has no graph.",
                     "additionalProperties": {"type": "array", "items": {"type": "string"}}
                 },
+                "issues_url": {
+                    "type": ["string", "null"],
+                    "description": "Present with --explain: the package's issue tracker URL from its PyPI metadata (or GitHub /issues fallback), or null if none was found or the package's index isn't known to be PyPI."
+                },
                 "build_requires": {
                     "type": ["array", "null"],
                     "items": {"type": "string"},
