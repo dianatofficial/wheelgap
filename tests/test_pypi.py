@@ -798,6 +798,23 @@ def test_extract_issues_url_github_fallback():
     assert pypi.extract_issues_url(None, homepage="https://github.com/org/repo") == "https://github.com/org/repo/issues"
 
 
+def test_extract_issues_url_refuses_control_characters():
+    # The URL comes from the package's metadata and is printed to a terminal: no escape sequences, no line breaks.
+    for bad in (
+        "https://github.com/org/repo/issues\x1b[2J",
+        "https://bugs.example.com/\x07",
+        "https://ex.com/a\nb",
+        "https://ex.com/\u202eevil",
+    ):
+        assert pypi.extract_issues_url({"Issues": bad}) is None, bad
+    assert pypi.extract_issues_url({"Source": "https://github.com/org/repo\x1b]8;;"}) is None
+
+
+def test_extract_issues_url_refuses_userinfo():
+    assert pypi.extract_issues_url({"Issues": "https://github.com@evil.example/x"}) is None
+    assert pypi.extract_issues_url({"Issues": "https://user:pass@bugs.example.com/"}) is None
+
+
 def test_extract_issues_url_rejects_insecure_and_invalid():
     assert pypi.extract_issues_url({"Issues": "http://insecure.example.com/issues"}) is None
     assert pypi.extract_issues_url({"Source": "http://github.com/org/repo"}) is None
@@ -805,3 +822,37 @@ def test_extract_issues_url_rejects_insecure_and_invalid():
     assert pypi.extract_issues_url(None, homepage="https://example.com/blog") is None
     assert pypi.extract_issues_url({}) is None
     assert pypi.extract_issues_url(None, None) is None
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Issue-Tracker", "Bug-Tracker", "bugtracker", "issue_tracker", "GitHub: issues", "ISSUES ", "Bug Reports", "Bug"],
+)
+def test_extract_issues_url_normalises_labels_like_pep_753(label):
+    """#410: lowercase, then drop punctuation and whitespace, as PyPI does for its well-known labels."""
+    url = "https://github.com/org/repo/issues"
+    assert pypi.extract_issues_url({label: url, "Documentation": "https://docs.example.com"}) == url
+
+
+def test_extract_issues_url_matches_whole_labels_only():
+    # "Known issues" usually points at a docs page listing problems, not a place to ask for a wheel, so it
+    # doesn't count as the tracker; the GitHub source link is used instead.
+    urls = {"Known issues": "https://docs.example.com/known-issues", "Source Code": "https://github.com/org/repo"}
+    assert pypi.extract_issues_url(urls) == "https://github.com/org/repo/issues"
+    assert pypi.extract_issues_url({"Known issues": "https://docs.example.com/known-issues"}) is None
+
+
+def test_extract_issues_url_normalised_labels_keep_the_safety_checks():
+    assert pypi.extract_issues_url({"Issue-Tracker": "http://bugs.example.com/project"}) is None
+    assert pypi.extract_issues_url({"issue_tracker": "https://bugs.example.com/a b"}) is None
+    # The first of two labels that normalise alike wins, and a preferred key beats a later fallback one.
+    urls = {"Bug-Tracker": "https://bugs.example.com/first", "bug tracker": "https://bugs.example.com/second"}
+    assert pypi.extract_issues_url(urls) == "https://bugs.example.com/first"
+    urls = {"Tracker": "https://tracker.example.com/demo", "Issue_Tracker": "https://bugs.example.com/project"}
+    assert pypi.extract_issues_url(urls) == "https://bugs.example.com/project"
+
+
+def test_extract_issues_url_takes_the_first_valid_of_labels_that_normalise_alike():
+    # "Issues" with an http URL and "issues" with an https one: the https one, as before label normalisation.
+    urls = {"Issues": "http://bugs.example.com/", "issues": "https://bugs.example.com/"}
+    assert pypi.extract_issues_url(urls) == "https://bugs.example.com/"

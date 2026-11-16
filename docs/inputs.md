@@ -18,8 +18,9 @@ wheelgap psycopg2 numpy==2.3.4    # package names, with or without a version
 | [`pdm.lock`](#pdmlock) | yes, if it lists files | no |
 | [`Pipfile.lock`](#pipfilelock) | no | no |
 | [`pixi.lock`](#pixilock) | no | no |
-| [requirements files](#requirements-files) | no | with `--deps` (after 0.11.0) |
-| [`pyproject.toml`](#pyprojecttoml) | no | with `--deps` (after 0.11.0) |
+| [requirements files](#requirements-files) | no | with `--deps` |
+| [pip installation report](#pip-installation-report) (after 0.12.0) | no | no |
+| [`pyproject.toml`](#pyprojecttoml) | no | with `--deps` |
 | [package names](#package-names) | no | with `--deps` |
 
 "Read without network" means the lockfile records every file published for each pinned version, so wheelgap
@@ -218,6 +219,29 @@ missing from all of them.
 `check_lockfile()` takes `environment=` too; the MCP tools and `[tool.wheelgap]` read the `default` environment only.
 Naming an environment for any other lockfile is an error.
 
+## Pip installation report
+
+After 0.12.0, wheelgap reads the report `pip install --dry-run --report` writes: exactly what pip resolved, without
+installing anything. Make the report on the target you want to check, and check that target only:
+
+```bash
+python -m pip install --dry-run --ignore-installed --report report.json -r requirements.txt
+wheelgap report.json -p 3.14 -t linux-aarch64   # on a Linux aarch64 machine with Python 3.14
+```
+
+wheelgap reads `version: "1"` reports and the `metadata.name` / `metadata.version` pins under `install`, and looks
+each one up on the index to check its wheels. VCS checkouts, local paths and direct URLs are skipped, and so are
+packages pip didn't download from PyPI (`files.pythonhosted.org`); a report whose packages all came from another
+index, such as an Artifactory or devpi mirror, is an error rather than a run with nothing checked.
+
+A pip report is a snapshot of what pip resolved for one environment, **not** a cross-platform lockfile: on another
+platform, machine or Python, pip can install other packages (Windows-only dependencies, say) and leave some of these
+out. So wheelgap refuses a target that differs from the report's `environment` in `sys_platform`,
+`platform_machine`, `python_version` or `implementation_name`, and a report without one. For `win32`, `linux-i686`
+and `linux-armv7l` it doesn't compare `platform_machine`, since a matching machine can report `AMD64`, `x86_64` or
+`aarch64` there. To check several targets, make a report on each and check each against its own target.
+`check_lockfile()` refuses the same way.
+
 ## Requirements files
 
 `requirements.txt`, `requirements.lock` and other requirements files are looked up on the index. Feed wheelgap a
@@ -249,6 +273,12 @@ root, and the whole tree it installs is checked per target. Constraint files and
 apply to the resolved packages too. A fully pinned file that already lists what it installs (`pip-compile` output
 with `--hash` lines or `# via` comments) needs no resolving: wheelgap says so and checks it as written.
 
+With `--deps` (after 0.12.0), a constraint with an environment marker applies only on the targets where its marker
+holds, as pip evaluates it: `urllib3<2; python_version < "3.12"` constrains Python 3.11 but not Python 3.14, and
+`extra == "…"` never holds on a constraint. A constraint on a package the tree doesn't install imposes nothing. When a
+target can't decide a marker on an installed package (`platform_release`, `platform_version`, or `platform_machine`
+on a target such as `linux-armv7l`), wheelgap refuses rather than guess, as it does for a URL or path constraint.
+
 ## pyproject.toml
 
 Libraries usually don't commit a lockfile. Pass the library's `pyproject.toml` to check the dependencies it declares
@@ -267,7 +297,7 @@ Each requirement is read like a line of a requirements file, so ranges and bare 
 and markers are respected. A range picks the newest release whose `Requires-Python` allows each `-p` version, so with
 several it can pick a different release per Python ([how it works](how-it-works.md)). A bare name always checks the
 latest release, even for a `-p` version that can't install it, so it can show false gaps. Only direct
-dependencies are checked by default and wheelgap prints a note saying so. After 0.11.0, add [`--deps`](cli.md#deps) to resolve
+dependencies are checked by default and wheelgap prints a note saying so. Add [`--deps`](cli.md#deps) to resolve
 them and the selected extras using PyPI's metadata for each target. Projects that configure a custom installer
 index or source need a lockfile for this check.
 
