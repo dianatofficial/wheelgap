@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python API & MCP: `Result.to_dict(explain=True)` and MCP's `check_package` (with `explain: true`) now include `issues_url`, the package's issue tracker link from PyPI metadata, matching `--json --explain`. In the Python API, `Result.issues_url` is also accessible directly, and `dependency_gaps` in MCP includes `issues_url` when `dependencies: true` and `explain: true` are combined. (#409)
+
 - `--deps` now caches each wheel's metadata file (its `Requires-Dist`) on disk for 24 hours, like pinned lookups, so a repeat run asks PyPI only for the release lists. `--no-cache` skips it, `--online` asks again, failed reads aren't cached, and the Python API doesn't use it. (#408, thanks [@sarankumar1325](https://github.com/sarankumar1325))
 - `--explain` now links each gap to the package's issue tracker from PyPI metadata (`ask for a wheel: <url>`), only for packages whose index is known to be PyPI. `--json --explain` includes an additive `issues_url` per package. (#400)
 - Text and Markdown gap tables now name the direct dependency behind a transitive gap (for example, `cryptography (via mcp)`), with a count when more direct dependencies lead to it; works with `uv.lock`, Poetry 1.x and `--deps`, while leaving JSON and quiet output unchanged. (#406, thanks [@AdityaSreevatsaK](https://github.com/AdityaSreevatsaK))
