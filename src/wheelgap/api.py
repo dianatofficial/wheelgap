@@ -25,7 +25,7 @@ from typing import ClassVar, Literal, overload
 from . import origin, pypi
 from .check import Row, Status, check, explain, explain_lines, status_for, wheel_tags
 from .deps import Resolver, pinned_complete, resolve_deps
-from .offline import require_offline, undo_offline
+from .offline import require_offline
 from .pyodide import PyodideLock, bundled_version_differs, bundles, check_locks
 from .pypi import fill_all, recheck_lock
 from .sources import (
@@ -94,8 +94,8 @@ class Result:
     bundled_version: str | None = None
     bundled_version_differs: bool = False
     # Per SOURCE or MISSING target, the dependency path from a root down to this package, as --explain shows it:
-    # ("app", "pandas", "numpy"), or ("(dev group)", "pytest") for a dependency group. Only check_lockfile() fills
-    # it, and only for inputs with a dependency graph (uv.lock, and poetry.lock before lock-version 2.1).
+    # ("app", "pandas", "numpy"), or ("(dev group)", "pytest") for a dependency group. Filled for inputs with a
+    # dependency graph: uv.lock and poetry.lock before lock-version 2.1, and anything checked with deps=True.
     via: dict[Target, tuple[str, ...]] = field(default_factory=dict)
     # Files of a pinned release that the index marks as yanked: pip skips them when the release has others it can use.
     yanked: frozenset[str] = frozenset()
@@ -477,7 +477,7 @@ def _check_lockfile(
             )
         if offline:
             raise SourceError(
-                f"offline=True: --deps would look packages up on PyPI; drop --deps, or {undo_offline('offline=True')}"
+                "offline=True: deps=True would look packages up on PyPI; pass deps=False, or set offline=False"
             )
         if not source.pypi_only:
             raise SourceError(
@@ -503,7 +503,9 @@ def _check_lockfile(
             require_offline([source], "offline=True", undo="set offline=False")
 
     fill_all(source.packages, refresh=online, pythons=tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets)))
-    if not online and not offline and pythons_outside_lock(source, targets):
+    # A pyproject.toml or a resolved tree has no lock to re-check (as the command line: its files are PyPI's own).
+    lock = source.pyproject_extras is None and not (deps and not pinned_complete(source))
+    if lock and not online and not offline and pythons_outside_lock(source, targets):
         recheck_lock(source.packages)
     rows: list[Row] = [r for r in check([source], targets) if r.needed]
     issues = explain_issues_urls(rows, [source])

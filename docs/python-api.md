@@ -86,10 +86,14 @@ Check every package a lockfile (or a project directory) installs on at least one
 target's Python may be missing wheels for it, so its PyPI packages are also looked up on the index (keeping the
 lock's files if a lookup fails).
 
-- `deps=True` resolves the dependency tree for requirements files and `pyproject.toml` inputs from PyPI metadata, as
-  `--deps` does on the command line. Each transitive package gets its own `Result`, with `via` giving the path from
-  your input. With `deps=True`, `pyproject.toml` (and a project directory containing only one) is accepted.
-  Lockfile inputs and `offline=True` are refused.
+- `deps=True` (after 0.12.0) resolves the dependency tree for requirements files and `pyproject.toml` inputs from
+  PyPI metadata for each target, as `--deps` does on the command line. Each package in the tree gets its own
+  `Result`, and on its gap targets `via` gives the path from your input and `direct` the direct dependencies behind
+  it. A `pyproject.toml` (or a project directory with only one) is accepted and read from `[project] dependencies`
+  (no extras). It's refused where `--deps` refuses: lockfiles, `offline=True`, a project or environment that names
+  another index, and requirement files pip would follow differently (a `SourceError` saying so). A requirements
+  file that already pins everything with hashes is checked as written. Requirements that aren't index packages
+  (`-e .`, a path, a URL) aren't resolved, so what they install isn't checked.
 - `online=True` re-checks the lockfile's packages on the index, as `--online` does.
 - `offline=True` never contacts an index: it raises `wheelgap.sources.SourceError` if an input has no locked file
   list, and skips the re-check for Python versions outside the lock's `requires-python` (so those versions may show
@@ -150,13 +154,13 @@ why), a result explains the gap the way `--explain` does:
   iOS and Android).
 - `result.via` maps the same targets to the dependency path from a root down to the package, as `--explain`'s `via:`
   line shows it: `("app", "pandas", "numpy")`, or `("(dev group)", "pytest")` when a dependency group pulls it in.
-  `check_lockfile()` fills it for `uv.lock`, and for `poetry.lock` files older than lock-version 2.1, and
-  `check_packages()` and `check_package()` fill it with `deps=True`; it's empty for other inputs.
+  `check_lockfile()` fills it for `uv.lock`, for `poetry.lock` files older than lock-version 2.1, and with
+  `deps=True`, and `check_packages()` and `check_package()` fill it with `deps=True`; it's empty for other inputs.
 - `result.direct` (after 0.12.0) maps the same targets to the direct dependencies that lead to the package, as the
   table's `(via ...)` names them: `result.direct[target]` is a tuple such as `("mcp", "httpx")`, and
   `to_dict(explain=True)` gives `{"3.13 win-arm64": ["mcp", "httpx"]}`. It's empty for a direct dependency and for
-  an input with no dependency graph: `check_lockfile()` fills it for `uv.lock`, and for `poetry.lock` files older than
-  lock-version 2.1, and `check_packages()` and `check_package()` fill it with `deps=True`.
+  an input with no dependency graph: `check_lockfile()` fills it for `uv.lock`, for `poetry.lock` files older than
+  lock-version 2.1, and with `deps=True`, and `check_packages()` and `check_package()` fill it with `deps=True`.
 - `result.issues_url` (after 0.12.0) is the package's issue tracker link from PyPI metadata, or `None` when absent, for
   private packages, or when pointing at another index.
 

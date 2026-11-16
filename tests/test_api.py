@@ -771,5 +771,72 @@ def test_check_lockfile_deps_refuses_lockfile(tmp_path):
 def test_check_lockfile_deps_refuses_offline(tmp_path):
     req = tmp_path / "requirements.txt"
     req.write_text("app==1.0\n", encoding="utf-8")
-    with pytest.raises(SourceError, match="offline=True: --deps would look packages up on PyPI"):
+    with pytest.raises(SourceError) as e:
         wheelgap.check_lockfile(req, offline=True, deps=True)
+    assert (
+        str(e.value) == "offline=True: deps=True would look packages up on PyPI; pass deps=False, or set offline=False"
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "text", "message"),
+    [
+        ("requirements.txt", "--index-url https://example.invalid/simple\napp==1.0\n", "--deps uses only PyPI"),
+        (
+            "pyproject.toml",
+            '[project]\nname = "w"\ndependencies = ["app"]\n[tool.uv]\nindex-url = "https://example.invalid/simple"\n',
+            "configures an installer index or source",
+        ),
+        ("requirements.txt", "-c constraints.txt\napp\n", "--deps can't follow this the way pip does"),
+    ],
+)
+def test_check_lockfile_deps_refuses_what_it_cant_resolve_on_pypi(index, tmp_path, filename, text, message):  # noqa: F811  (the index fixture)
+    # Another index may hold private packages of the same names, and a constraint pip would apply differently
+    # changes the tree: refuse rather than resolve something else, and send nothing to PyPI.
+    (tmp_path / "constraints.txt").write_text("app==1.0\napp==2.0\n", encoding="utf-8")
+    (tmp_path / filename).write_text(text, encoding="utf-8")
+    with pytest.raises(SourceError, match=re.escape(message)):
+        wheelgap.check_lockfile(tmp_path / filename, deps=True)
+    assert index == []
+
+
+def test_check_lockfile_deps_refuses_an_index_set_in_the_environment(index, tmp_path, monkeypatch):  # noqa: F811  (the index fixture)
+    (tmp_path / "requirements.txt").write_text("app==1.0\n", encoding="utf-8")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://example.invalid/simple")
+    with pytest.raises(SourceError, match="PIP_INDEX_URL may point pip or uv at another index"):
+        wheelgap.check_lockfile(tmp_path / "requirements.txt", deps=True)
+    assert index == []
+
+
+def test_check_lockfile_deps_checks_a_compiled_file_as_written(index, tmp_path):  # noqa: F811  (the index fixture)
+    (tmp_path / "requirements.txt").write_text(
+        "lib==2.0 \\\n    --hash=sha256:aa\n    # via app\ncrypt==1.0 \\\n    --hash=sha256:bb\n    # via lib\n",
+        encoding="utf-8",
+    )
+    results = wheelgap.check_lockfile(tmp_path / "requirements.txt", [WIN], deps=True)
+    assert sorted(r.name for r in results) == ["crypt", "lib"]  # nothing resolved: only what the file pins
+    assert all(r.via == {} for r in results)
+    assert all("/lib/" in url or "/crypt/" in url for url in index)
+
+
+def test_check_lockfile_deps_prefers_a_lockfile_beside_pyproject(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "w"\ndependencies = ["app"]\n', encoding="utf-8")
+    (tmp_path / "uv.lock").write_text(LOCK_ABI3, encoding="utf-8")
+    with pytest.raises(SourceError, match="a lockfile already lists what it installs"):
+        wheelgap.check_lockfile(tmp_path, deps=True)
+
+
+@pytest.mark.usefixtures("index")
+def test_check_lockfile_deps_has_no_lock_to_recheck(tmp_path, monkeypatch):
+    # A pyproject.toml, or a tree resolved from PyPI, has no lock made for other Pythons: no second, uncached
+    # lookup of every package, as on the command line.
+    import wheelgap.api
+
+    rechecked = []
+    monkeypatch.setattr(wheelgap.api, "recheck_lock", lambda packages: rechecked.append(packages))
+    monkeypatch.setattr(wheelgap.api, "pythons_outside_lock", lambda source, targets: True)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "w"\ndependencies = ["app==1.0"]\n', encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("app==1.0\n", encoding="utf-8")
+    wheelgap.check_lockfile(tmp_path / "pyproject.toml", [WIN, LIN], deps=True)
+    wheelgap.check_lockfile(tmp_path / "requirements.txt", [WIN, LIN], deps=True)
+    assert rechecked == []
