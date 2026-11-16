@@ -24,11 +24,12 @@ from typing import ClassVar, Literal, overload
 
 from . import origin, pypi
 from .check import Row, Status, check, explain, explain_lines, status_for, wheel_tags
-from .deps import resolve_deps
-from .offline import require_offline
+from .deps import Resolver, pinned_complete, resolve_deps
+from .offline import require_offline, undo_offline
 from .pyodide import PyodideLock, bundled_version_differs, bundles, check_locks
 from .pypi import fill_all, recheck_lock
 from .sources import (
+    LOCKFILES,
     Package,
     Source,
     SourceError,
@@ -400,6 +401,7 @@ def check_lockfile(
     offline: bool = False,
     pyodide_locks: Iterable[PyodideLock] = (),
     environment: str | None = None,
+    deps: bool = False,
 ) -> list[Result]:
     """Check every package a lockfile (or a project directory) installs on at least one target.
 
@@ -408,6 +410,11 @@ def check_lockfile(
     looked up on the index (keeping the lock's files if a lookup fails).
     Requirements ranges resolve separately for each target Python major/minor. Distinct resolutions return
     separate Results with their own version and eligible files; targets using another resolution are NOT_NEEDED.
+    deps=True resolves the dependency tree for requirements files and pyproject.toml inputs from PyPI metadata,
+    as --deps does: one Result per package in the tree, with `via` giving each gap target's path from a direct
+    dependency. A tree that can't be resolved raises DepsError (a SourceError). With deps=True, pyproject.toml
+    (and a project directory containing only one) is accepted; lockfile inputs (uv.lock, poetry.lock, ...) and
+    offline=True are refused.
     With offline=True, only locked files are used: inputs needing an index lookup raise SourceError, and the
     other-Python recheck is skipped. Locked files may therefore omit wheels for those Python versions.
     online=True and offline=True cannot be combined.
@@ -418,7 +425,13 @@ def check_lockfile(
     SourceError unless every target matches that environment's platform, machine, Python and implementation.
     """
     return _check_lockfile(
-        path, targets, online=online, offline=offline, pyodide_locks=pyodide_locks, environment=environment
+        path,
+        targets,
+        online=online,
+        offline=offline,
+        pyodide_locks=pyodide_locks,
+        environment=environment,
+        deps=deps,
     )[0]
 
 
@@ -430,6 +443,7 @@ def _check_lockfile(
     offline: bool,
     pyodide_locks: Iterable[PyodideLock] = (),
     environment: str | None = None,
+    deps: bool = False,
 ) -> tuple[list[Result], Source, list[Row]]:
     """check_lockfile(), also returning the source and check rows for diff's skips and suggestions."""
     targets = _package_targets(targets)
@@ -438,8 +452,15 @@ def _check_lockfile(
         raise ValueError("online=True and offline=True cannot be combined")
     check_locks(pyodide_locks, targets)
     p = Path(path)
-    lockfile = find_lockfile(p, environment is not None) if p.is_dir() else p
-    if lockfile.name == "pyproject.toml":  # direct dependencies only; the command line says so in a note
+    if p.is_dir():
+        if deps and not any((p / name).is_file() for name in LOCKFILES) and (p / "pyproject.toml").is_file():
+            lockfile = p / "pyproject.toml"
+        else:
+            lockfile = find_lockfile(p, environment is not None)
+    else:
+        lockfile = p
+
+    if lockfile.name == "pyproject.toml" and not deps:
         raise SourceError(
             f"{lockfile}: a pyproject.toml lists direct dependencies only, so check_lockfile() and "
             "wheelgap.diff don't read it; pass a lockfile (the wheelgap command checks a pyproject.toml)"
@@ -447,9 +468,40 @@ def _check_lockfile(
     source: Source = load_file(lockfile, environment)
     if environment is not None and source.kind != "pixi":
         raise SourceError(f"{lockfile}: environment applies to pixi.lock only")
-    check_report_targets(source, targets)
-    if offline:
-        require_offline([source], "offline=True", undo="set offline=False")
+
+    if deps:
+        if not (source.specs or source.pyproject_extras is not None):
+            raise SourceError(
+                "--deps applies to package names on the command line, requirements files or pyproject.toml; "
+                "a lockfile already lists what it installs"
+            )
+        if offline:
+            raise SourceError(
+                f"offline=True: --deps would look packages up on PyPI; drop --deps, or {undo_offline('offline=True')}"
+            )
+        if not source.pypi_only:
+            raise SourceError(
+                f"{source.label}: the project configures an installer index or source; "
+                "--deps uses only PyPI, so check a lockfile instead"
+            )
+        if (env := origin.index_env()) is not None:
+            raise SourceError(
+                f"{source.label}: {env} may point pip or uv at another index, and --deps uses only PyPI, "
+                "so check a lockfile instead"
+            )
+        if not pinned_complete(source):
+            if source.deps_blockers:
+                raise SourceError(
+                    f"{source.label}: --deps can't follow this the way pip does ({source.deps_blockers[0]}), "
+                    "so check a lockfile instead (pip-compile, or uv pip compile)"
+                )
+            resolver = Resolver(read_cache=not online, write_cache=True)
+            resolve_deps(source, targets, resolver)
+    else:
+        check_report_targets(source, targets)
+        if offline:
+            require_offline([source], "offline=True", undo="set offline=False")
+
     fill_all(source.packages, refresh=online, pythons=tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets)))
     if not online and not offline and pythons_outside_lock(source, targets):
         recheck_lock(source.packages)

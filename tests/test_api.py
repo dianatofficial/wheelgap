@@ -729,3 +729,47 @@ def test_check_lockfile_issues_url(fake_pypi, tmp_path):
     results = {r.name: r for r in wheelgap.check_lockfile(tmp_path, targets)}
     assert results["abi3lib"].issues_url is None
     assert results["abi3lib"].to_dict(explain=True)["issues_url"] is None
+
+
+@pytest.mark.usefixtures("index")
+def test_check_lockfile_deps_requirements(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("app==1.0\n", encoding="utf-8")
+    results = wheelgap.check_lockfile(req, [WIN, LIN], deps=True)
+    rows = {r.name: r for r in results}
+    assert sorted(rows) == ["app", "crypt", "lib", "winonly"]
+    assert rows["crypt"].statuses == {WIN: Status.SOURCE, LIN: Status.WHEEL}
+    assert rows["crypt"].via == {WIN: ("app", "lib", "crypt")}
+    assert rows["crypt"].direct == {WIN: ("app",)}
+
+
+@pytest.mark.usefixtures("index")
+def test_check_lockfile_deps_pyproject(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "myproj"\nversion = "0.1.0"\ndependencies = ["app==1.0"]\n',
+        encoding="utf-8",
+    )
+    results = wheelgap.check_lockfile(pyproject, [WIN, LIN], deps=True)
+    rows = {r.name: r for r in results}
+    assert sorted(rows) == ["app", "crypt", "lib", "winonly"]
+    assert rows["crypt"].statuses == {WIN: Status.SOURCE, LIN: Status.WHEEL}
+    assert rows["crypt"].via == {WIN: ("app", "lib", "crypt")}
+
+    # Also works on a project directory containing only pyproject.toml
+    dir_results = wheelgap.check_lockfile(tmp_path, [WIN, LIN], deps=True)
+    dir_rows = {r.name: r for r in dir_results}
+    assert sorted(dir_rows) == ["app", "crypt", "lib", "winonly"]
+
+
+def test_check_lockfile_deps_refuses_lockfile(tmp_path):
+    (tmp_path / "uv.lock").write_text(LOCK_ABI3, encoding="utf-8")
+    with pytest.raises(SourceError, match="--deps applies to package names.*a lockfile already lists what it installs"):
+        wheelgap.check_lockfile(tmp_path / "uv.lock", deps=True)
+
+
+def test_check_lockfile_deps_refuses_offline(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("app==1.0\n", encoding="utf-8")
+    with pytest.raises(SourceError, match="offline=True: --deps would look packages up on PyPI"):
+        wheelgap.check_lockfile(req, offline=True, deps=True)
