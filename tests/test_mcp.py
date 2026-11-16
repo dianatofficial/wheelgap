@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from conftest import FAKE_INDEX
-from test_deps import index  # noqa: F401  (the fake PyPI --deps resolves against)
+from test_deps import INDEX, LINUX, WIN_AMD, WIN_ARM, index, release  # noqa: F401  (index: --deps' fake PyPI)
 from test_dist import LINUX_WHEEL, SDIST, WIN_ARM_WHEEL, dist
 
 from wheelgap import __version__, mcp
@@ -120,8 +120,8 @@ def test_check_package(fake_pypi):
     assert data["gaps"] == ["3.13 linux-aarch64"]
     assert data["version"] == "311"
     assert data["assumes"] == {"glibc": "2.36", "musl": "1.2", "macos": "14.0"}
-    assert data["last_with_wheel"] == {}
-    # The second request reads the older releases for last_with_wheel, as --suggest does.
+    assert data["suggest"] == {} and data["last_with_wheel"] == {}
+    # The second request reads the older releases for the way out, as --suggest does.
     assert fake_pypi == ["https://pypi.org/pypi/winonly/json"] * 2
 
 
@@ -141,19 +141,115 @@ def test_check_package_names_the_last_older_release_with_a_wheel(fake_pypi, monk
     data = reply["result"]["structuredContent"]
     assert data["version"] == "2.0"
     assert data["gaps"] == ["3.13 win-arm64", "3.13 linux-riscv64"]
+    assert data["suggest"] == {}  # no newer release has a wheel for either gap
     assert data["last_with_wheel"] == {"3.13 win-arm64": "1.1"}
+
+
+LATEWHEEL = {
+    "1.0": ["latewheel-1.0-cp313-cp313-win_amd64.whl", "latewheel-1.0.tar.gz"],
+    "2.0": [
+        "latewheel-2.0-cp313-cp313-win_amd64.whl",
+        "latewheel-2.0-cp313-cp313-win_arm64.whl",
+        "latewheel-2.0.tar.gz",
+    ],
+}
+
+
+def test_check_package_suggests_the_newer_release_with_the_wheel(fake_pypi, monkeypatch):
+    # As --explain --suggest --json's suggest: by gap target a newer release has a wheel for, that release.
+    monkeypatch.setitem(FAKE_INDEX, "latewheel", LATEWHEEL)
+    (_, reply) = run(
+        init(), call("check_package", name="latewheel", version="1.0", python="3.13", targets=["win-arm64"])
+    )
+    data = reply["result"]["structuredContent"]
+    assert data["results"] == {"3.13 win-arm64": "source"}
+    assert data["suggest"] == {"3.13 win-arm64": "2.0"}
+    assert data["last_with_wheel"] == {}
+
+
+def test_check_package_dependencies_gaps_get_the_way_out(index, monkeypatch):  # noqa: F811  (the index fixture)
+    # crypt 1.0 has no Windows ARM wheel but 1.1 does; tool's dropped has one only in its older release.
+    monkeypatch.setitem(INDEX, "crypt", INDEX["crypt"] | {"1.1": release(files=(LINUX, WIN_AMD, WIN_ARM))})
+    monkeypatch.setitem(INDEX, "both", {"1.0": release(["crypt==1.0", "dropped"])})
+    lookups = []
+    real = mcp.release_suggest.look_up_all
+
+    def spy(wanted, deadline=mcp.release_suggest.DEADLINE):
+        lookups.append(sorted(wanted))
+        return real(wanted, deadline)
+
+    monkeypatch.setattr(mcp.release_suggest, "look_up_all", spy)
+    (_, reply) = run(
+        init(),
+        call("check_package", name="both", version="1.0", python="3.14", targets=["win-arm64"], dependencies=True),
+    )
+    data = reply["result"]["structuredContent"]
+    by_name = {d["name"]: d for d in data["dependency_gaps"]}
+    assert by_name["crypt"]["suggest"] == {"3.14 win-arm64": "1.1"}
+    assert by_name["crypt"]["last_with_wheel"] == {}
+    assert by_name["dropped"]["suggest"] == {}
+    assert by_name["dropped"]["last_with_wheel"] == {"3.14 win-arm64": "1.0"}
+    # The whole tree's releases are read in one look_up_all call, not one per package.
+    assert lookups == [["crypt", "dropped"]]
+    assert index.count("https://pypi.org/pypi/crypt/json") == 2  # once for the tree, once in the batch
+    assert index.count("https://pypi.org/pypi/dropped/json") == 2
+
+
+def test_check_package_no_way_out_for_targets_it_never_checked(fake_pypi, monkeypatch):
+    # 1.5 isn't on the index: every target is unknown, so there's no gap to suggest a way out of (as the CLI).
+    monkeypatch.setitem(FAKE_INDEX, "latewheel", LATEWHEEL)
+    (_, reply) = run(
+        init(), call("check_package", name="latewheel", version="1.5", python="3.13", targets=["win-arm64"])
+    )
+    data = reply["result"]["structuredContent"]
+    assert data["results"] == {"3.13 win-arm64": "unknown"}
+    assert "suggest" not in data and "last_with_wheel" not in data
+
+
+@pytest.mark.usefixtures("index")
+def test_check_package_way_out_covers_every_release_it_resolved_to(monkeypatch):
+    # split resolves to 1.0 on 3.14 and 2.0 on 3.15, both without a Windows ARM wheel: each has its own way out.
+    import test_deps
+
+    monkeypatch.setitem(
+        test_deps.INDEX,
+        "split",
+        {
+            "1.0": test_deps.release(files=(test_deps.LINUX,)),
+            "2.0": test_deps.release(files=(test_deps.LINUX,), requires_python=">=3.15"),
+        },
+    )
+    newer = {"1.0": "1.5", "2.0": "2.5"}
+
+    def fake(results):
+        return {
+            id(r): mcp.release_suggest.Suggestion(found={t: newer[r.version] for t in r.gaps})
+            for r in results
+            if r.name == "split" and r.gaps
+        }
+
+    monkeypatch.setattr(mcp, "_suggestions", fake)
+    (_, reply) = run(
+        init(), call("check_package", name="split", python="3.14,3.15", targets=["win-arm64"], dependencies=True)
+    )
+    data = reply["result"]["structuredContent"]
+    assert data["versions"] == ["1.0", "2.0"]
+    assert data["suggest"] == {"3.14 win-arm64": "1.5", "3.15 win-arm64": "2.5"}
+    assert data["last_with_wheel"] == {}
 
 
 def test_check_package_looks_up_older_releases_only_for_gaps_on_pypi(fake_pypi, monkeypatch):
     monkeypatch.setitem(FAKE_INDEX, "wheelstopped", WHEELSTOPPED)
     (_, reply) = run(init(), call("check_package", name="purewheel", python="3.13", targets=["linux-x86_64"]))
     assert "last_with_wheel" not in reply["result"]["structuredContent"]  # no gap, so nothing to look up
+    assert "suggest" not in reply["result"]["structuredContent"]
     assert fake_pypi == ["https://pypi.org/pypi/purewheel/json"]
     # Another index may hold private names next to PyPI's, so --suggest's rule applies: nothing is looked up.
     monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://mirror.example/pypi")
     fake_pypi.clear()
     (_, reply) = run(init(), call("check_package", name="wheelstopped", python="3.13", targets=["win-arm64"]))
     assert reply["result"]["structuredContent"]["gaps"] == ["3.13 win-arm64"]
+    assert "suggest" not in reply["result"]["structuredContent"]
     assert "last_with_wheel" not in reply["result"]["structuredContent"]
     assert fake_pypi == ["https://mirror.example/pypi/wheelstopped/json"]
 
@@ -220,7 +316,18 @@ def test_check_package_without_explain_has_no_explain_keys(fake_pypi, extra):
     (_, reply) = run(init(), call("check_package", name="nowheels", python="3.13", targets=["linux-x86_64"], **extra))
     data = reply["result"]["structuredContent"]
     assert data["results"] == {"3.13 linux-x86_64": "source"}
-    assert set(data) == {"name", "version", "error", "results", "ok", "gaps", "targets", "assumes", "last_with_wheel"}
+    assert set(data) == {
+        "name",
+        "version",
+        "error",
+        "results",
+        "ok",
+        "gaps",
+        "targets",
+        "assumes",
+        "suggest",
+        "last_with_wheel",
+    }
 
 
 def test_check_package_explain_caps_rejected_wheels(fake_pypi, monkeypatch):
@@ -309,6 +416,8 @@ def test_check_package_dependencies_checks_the_tree():
             "results": {"3.14 win-arm64": "source", "3.14 linux-x86_64": "wheel"},
             "gaps": ["3.14 win-arm64"],
             "via": {"3.14 win-arm64": ["app", "lib", "crypt"]},
+            "suggest": {},  # 1.0 is crypt's only release: looked up, nothing to move to
+            "last_with_wheel": {},
         }
     ]
     (_, reply_explain) = run(
@@ -332,6 +441,8 @@ def test_check_package_dependencies_checks_the_tree():
             "gaps": ["3.14 win-arm64"],
             "via": {"3.14 win-arm64": ["app", "lib", "crypt"]},
             "issues_url": None,
+            "suggest": {},
+            "last_with_wheel": {},
         }
     ]
 
@@ -406,6 +517,78 @@ def test_check_lockfile_reports_only_gaps(fake_pypi, fixtures):
         "nativeext": {"3.13 linux-x86_64": "source"},
         "puresdist": {"3.13 linux-x86_64": "source"},
     }
+
+
+@pytest.mark.usefixtures("index")
+def test_check_lockfile_dependencies_resolves_transitive_gaps(tmp_path):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("app==1.0\n", encoding="utf-8")
+    args = {"path": str(requirements), "python": "3.14", "targets": ["win-arm64", "linux-x86_64"]}
+    (_, direct, tree) = run(
+        init(),
+        call("check_lockfile", **args),
+        call("check_lockfile", 2, **args, dependencies=True),
+    )
+    assert direct["result"]["isError"] is False
+    assert direct["result"]["structuredContent"]["gaps"] == []
+    assert tree["result"]["isError"] is False
+    data = tree["result"]["structuredContent"]
+    crypt = next(g for g in data["gaps"] if g["name"] == "crypt")
+    assert crypt["results"]["3.14 win-arm64"] == "source"
+    assert crypt["via"] == {"3.14 win-arm64": ["app", "lib", "crypt"]}
+    assert crypt["direct"] == {"3.14 win-arm64": ["app"]}  # labelled like results, as via is
+    # Only the tool's own keys: --explain's others (rejected wheels, notes...) aren't part of the answer.
+    assert not set(crypt) & {"rejected", "issues_url", "notes", "build_lab", "build_requires", "suggest"}
+    assert data["ok"] is False
+
+
+@pytest.mark.usefixtures("index")
+def test_check_lockfile_dependencies_doesnt_send_names_to_the_tracker(tmp_path, monkeypatch):
+    # notes = true in the project: --explain would fetch the tracker's notes for every gap; this tool asks none.
+    (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\nnotes = true\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("app==1.0\n", encoding="utf-8")
+    import wheelgap.notes
+
+    asked = []
+    monkeypatch.setattr(wheelgap.notes, "lookup", lambda names, *a, **k: asked.append(names) or ({}, {}, False))
+    (_, reply) = run(
+        init(),
+        call(
+            "check_lockfile",
+            path=str(tmp_path / "requirements.txt"),
+            python="3.14",
+            targets=["win-arm64"],
+            dependencies=True,
+        ),  # fmt: skip
+    )
+    assert reply["result"]["isError"] is False
+    assert reply["result"]["structuredContent"]["gaps"]  # the tree has a gap, so notes would have been asked for
+    assert asked == []
+
+
+@pytest.mark.parametrize("value", ["yes", 1, [], {}])
+def test_check_lockfile_dependencies_requires_boolean(tmp_path, value):
+    path = tmp_path / "requirements.txt"
+    path.write_text("purewheel==3.1\n", encoding="utf-8")
+    (_, reply) = run(init(), call("check_lockfile", path=str(path), dependencies=value))
+    assert reply["result"]["isError"] is True
+    assert "'dependencies' must be true or false" in reply["result"]["content"][0]["text"]
+
+
+def test_check_lockfile_dependencies_refuses_lockfiles_and_offline(tmp_path, fixtures):
+    (_, lockfile) = run(
+        init(),
+        call("check_lockfile", path=str(fixtures / "uvproj" / "uv.lock"), dependencies=True, python="3.13"),
+    )
+    assert lockfile["result"]["isError"] is True
+    assert "--deps" in lockfile["result"]["content"][0]["text"]
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("purewheel==3.1\n", encoding="utf-8")
+    (_, offline) = run(
+        init(), call("check_lockfile", path=str(requirements), dependencies=True, offline=True, python="3.13")
+    )
+    assert offline["result"]["isError"] is True
+    assert "--deps" in offline["result"]["content"][0]["text"]
 
 
 def test_check_lockfile_lists_skipped_packages(fake_pypi, fixtures):

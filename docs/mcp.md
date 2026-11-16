@@ -29,7 +29,12 @@ All six are read-only. They look packages up on PyPI, or on the index in
 - `check_lockfile`: the same answer as `wheelgap PATH --json`, `[tool.wheelgap]`
   settings included: the packages with gaps, the ones it skipped (git, path and
   private-index packages, which aren't checked) and any notes. It also returns
-  `blocking_newer_python` when two Pythons, one newer, are checked.
+  `blocking_newer_python` when two Pythons, one newer, are checked. With
+  `dependencies: true` (after 0.12.0), requirements files and `pyproject.toml`
+  are resolved as `--deps` would, including transitive gaps, each with `via`
+  (the path to it on each gap target) and `direct` (the direct dependencies
+  behind it). It's refused where `--deps` is: lockfiles, offline, and another
+  index.
 - `check_dockerfile`: the answer of
   `wheelgap PATH --dockerfile DOCKERFILE --json` (`PATH` defaults to the
   Dockerfile's folder), plus the `image` it read (`python`, `platform`,
@@ -58,6 +63,12 @@ All six are read-only. They look packages up on PyPI, or on the index in
   (`mkdir -p /tmp/old && git show HEAD:uv.lock > /tmp/old/uv.lock`) and ask
   whether the upgrade lost a wheel.
 - `list_targets`: the platform names the other tools accept.
+
+For example (after 0.12.0), to check everything `requirements.txt` installs, call
+`check_lockfile` with `{"path": "requirements.txt", "python": "3.13",
+"targets": ["win-arm64"], "dependencies": true}`. The `dependencies` argument
+is a boolean, defaults to `false`, and follows the command line's `--deps`
+validation and error rules.
 
 On `pyodide` targets, `check_package` and `check_lockfile` take an optional
 `pyodide_lock` (a path or https URL of a `pyodide-lock.json`, as
@@ -117,6 +128,7 @@ for `check_dist` the nearest folder above the dist folder with a
 | `macos` | string | `[tool.wheelgap] macos`, else `14.0` | Oldest macOS version to support. |
 | `pyodide_lock` | string | `[tool.wheelgap] pyodide-lock` (when a pyodide target is checked) | Absolute path or https URL of a Pyodide release's `pyodide-lock.json`. |
 | `offline` | boolean | `[tool.wheelgap] offline`, else `false` | Use only the files recorded in the lockfile; never contact the index. `true` turns it on; `offline = true` in the project can't be turned off from here. |
+| `dependencies` | boolean | `false` | (after 0.12.0) Resolve transitive dependencies of requirements files and `pyproject.toml` with `--deps`; each gap gets `via` and `direct`. Refused for lockfiles, offline and another index. |
 
 #### `check_dockerfile`
 
@@ -303,14 +315,18 @@ reason (such as `abi3 wheels can't be used on free-threaded Python (only
 abi3t ones can)`), and `rejected_omitted` counting any it left out. Without
 `explain`, the result has only the statuses, which keeps it small.
 
-When a package has gaps, `check_package` also returns `last_with_wheel`, as
-`wheelgap --explain --suggest --json` does: for each gap target that no newer
-release has a wheel for, the newest older release that has one (of the 50
-newest before the one checked), such as `{"3.13 win-arm64": "46.0.3"}`, so an
-agent can answer "pin cryptography to 46.0.3 or earlier". It reads the
+When a package has gaps, `check_package` also returns `suggest` and
+`last_with_wheel`, as `wheelgap --explain --suggest --json` does: for each gap
+target some newer release has a wheel for, `suggest` names that release, such
+as `{"3.13 win-arm64": "46.0.4"}`, so an agent can answer "move to
+cryptography 46.0.4"; and for each gap target no newer release has a wheel
+for, `last_with_wheel` names the newest older release that has one (of the 50
+newest before the one checked), such as `{"3.13 win-arm64": "46.0.3"}`, so it
+can answer "pin cryptography to 46.0.3 or earlier". It reads the
 project's release list from PyPI, which is one more request, and is left out
 when there's no gap, when `WHEELGAP_INDEX_URL` points at another index (which
-may hold private names), or when that lookup fails.
+may hold private names), or when that lookup fails. (`suggest` is there after
+0.12.0; before it, only `last_with_wheel` is.)
 
 To check what a package installs as well as the package itself, as [`--deps`](cli.md#deps) does, pass
 `dependencies: true`:
@@ -321,7 +337,12 @@ The tree is resolved for each target from PyPI's metadata, and the result adds
 `dependencies_checked` (how many other packages were checked) and
 `dependency_gaps`: each package in the tree with a gap, with its `results`,
 `gaps` and `via`, the path to it on each gap target, such as
-`{"3.13 win-arm64": ["mcp", "PyJWT", "cryptography"]}`. The other fields stay
+`{"3.13 win-arm64": ["mcp", "PyJWT", "cryptography"]}`, and (after 0.12.0) its
+own `suggest` and `last_with_wheel`, looked up for the whole tree together.
+Those aren't checked against what the rest of the tree requires, so a parent
+may pin the dependency elsewhere: `via` shows who pulls it in. With several
+Pythons, the package's own `suggest` and `last_with_wheel` cover every release
+it resolved to. The other fields stay
 those of the package asked about, except `ok`, which is then true only if
 nothing in the tree has a gap. A tree that only a backtracking resolver could
 settle is an error, as it is on the command line.

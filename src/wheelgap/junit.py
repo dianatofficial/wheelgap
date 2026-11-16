@@ -5,6 +5,8 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from packaging.utils import canonicalize_name
+
 from .check import Row, Status
 from .targets import Target
 
@@ -58,6 +60,8 @@ def junit_xml(rows: list[Row], targets: list[Target], fail_on: str, advisory: fr
         # named as the first input writes it.
         names: dict[tuple[str, str | None], str] = {}
         merged: dict[tuple[str, str | None], tuple[str | None, str | None]] = {}  # failure, skip
+        # Save the origin with the winning cell: merging can replace a source gap with a missing one.
+        direct_via: dict[tuple[str, str | None], tuple[str, ...]] = {}
         for row in rows:
             status = row.results[target]
             ident = (row.package.key, row.package.version)
@@ -80,9 +84,15 @@ def junit_xml(rows: list[Row], targets: list[Target], fail_on: str, advisory: fr
             # source), then a pass, then skipped.
             if ident not in merged or _rank(cell) > _rank(merged[ident]):
                 merged[ident] = cell
-        cases = [(names[ident], fail, skip) for ident, (fail, skip) in merged.items()]
-        failures = sum(1 for _, fail, _ in cases if fail is not None)
-        skipped = sum(1 for _, _, skip in cases if skip is not None)
+                # This target's own direct dependencies (not the table's union across targets), each once, spelt
+                # as first seen, as the tables spell it.
+                seen: dict[str, str] = {}
+                for name in row.direct_via.get(target, ()):
+                    seen.setdefault(canonicalize_name(name), name)
+                direct_via[ident] = tuple(seen.values())
+        cases = [(names[ident], fail, skip, direct_via[ident]) for ident, (fail, skip) in merged.items()]
+        failures = sum(1 for _, fail, _, _ in cases if fail is not None)
+        skipped = sum(1 for _, _, skip, _ in cases if skip is not None)
         suite = ET.SubElement(
             root,
             "testsuite",
@@ -91,12 +101,22 @@ def junit_xml(rows: list[Row], targets: list[Target], fail_on: str, advisory: fr
             failures=str(failures),
             skipped=str(skipped),
         )
-        for name, fail, skip in cases:
+        for name, fail, skip, via in cases:
             case = ET.SubElement(suite, "testcase", name=name, classname=label)
+            # Keep the testcase identity stable; only enrich failed and advisory-skipped messages.
+            details = ""
+            if via and (fail is not None or (skip is not None and skip.startswith("advisory: "))):
+                suffix = f" +{len(via) - 1}" if len(via) > 1 else ""
+                details = f" (via {via[0]}{suffix})"
             if fail is not None:
-                ET.SubElement(case, "failure", message=fail).text = fail
+                text = fail + details
+                if details:
+                    text += "\nDirect dependencies: " + ", ".join(via)
+                ET.SubElement(case, "failure", message=fail + details).text = text
             elif skip is not None:
-                ET.SubElement(case, "skipped", message=skip)
+                node = ET.SubElement(case, "skipped", message=skip + details)
+                if details:
+                    node.text = "Direct dependencies: " + ", ".join(via)
     # XML declaration so picky parsers don't have to guess the encoding.
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 

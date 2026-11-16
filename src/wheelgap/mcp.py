@@ -68,6 +68,7 @@ from .targets import (
     MOBILE_PLATFORMS,
     NATIVE_PLATFORMS,
     PLATFORMS,
+    Target,
     TargetError,
 )
 
@@ -170,13 +171,16 @@ TOOLS: list[dict[str, Any]] = [
             f"source or missing target, up to {EXPLAIN_LIMIT} wheels it can't use and the reason for each, closest "
             "misses first (rejected_omitted counts any more), as wheelgap --json --explain does, and issues_url is "
             "the package's issue tracker from PyPI metadata (null when absent or not on PyPI). With gaps, "
-            "last_with_wheel maps each gap target no newer release has a wheel for to the newest older release that "
-            "has one (a version to pin to), as --explain --suggest --json does; it's absent when nothing was looked "
-            "up. With dependencies: true, also checks everything the package installs, resolved for each target "
-            "from PyPI's metadata as wheelgap --deps does: dependency_gaps lists each other package in the tree with "
-            "a gap, with its results, gaps and via (the path from this package to it on each gap target), plus "
-            "issues_url with explain: true, dependencies_checked counts the other packages checked, and ok is true "
-            "only if nothing in the tree has a gap. A tree that can't be settled without a backtracking resolver is an "
+            "suggest maps each gap target some newer release has a wheel for to that release (the version to move "
+            "to), and last_with_wheel maps each gap target no newer release has a wheel for to the newest older "
+            "release that has one (a version to pin to), as --explain --suggest --json does; both are absent when "
+            "nothing was looked up. With dependencies: true, also checks everything the package installs, resolved "
+            "for each target from PyPI's metadata as wheelgap --deps does: dependency_gaps lists each other "
+            "package in the tree with a gap, with its results, gaps and via (the path from this package to it on "
+            "each gap target) and its own suggest and last_with_wheel (not checked against what the rest of the "
+            "tree requires: via shows who pulls it in), plus issues_url with explain: true; "
+            "dependencies_checked counts the other packages checked, and ok is true only if nothing in the tree has "
+            "a gap. A tree that can't be settled without a backtracking resolver is an "
             "error, as on the command line. " + _STATUS_HELP
         ),
         "inputSchema": {
@@ -218,10 +222,15 @@ TOOLS: list[dict[str, Any]] = [
             "report the packages without a wheel on some target. Environment markers, .python-version and the "
             "project's [tool.wheelgap] settings (targets, python, glibc, ignore, offline, index-url, ...) apply; "
             "arguments given here override them, except that offline = true in the project can't be turned off. "
-            "Notes and errors name command-line flags (--offline is the offline argument here). "
+            "Notes and errors name command-line flags (--offline is the offline argument here, --deps the "
+            "dependencies argument). "
             "Packages from git, paths, URLs or private indexes are listed under "
             "'skipped': they were NOT checked. 'notes' says when an answer may be incomplete. Requirements files are "
-            "looked up on the index. 'ok' is true only when no package has a gap; 'passes' is the command line's "
+            "looked up on the index; with dependencies: true, requirements files and pyproject.toml are resolved "
+            "per target and all dependencies checked, as --deps does, and each gap gets via (the path to it from "
+            "a direct dependency on each gap target) and direct; refused where --deps refuses: lockfiles, offline "
+            "and another index. "
+            "'ok' is true only when no package has a gap; 'passes' is the command line's "
             "verdict (exit code 0), which also accepts gaps on the project's advisory targets (listed in 'advisory'; "
             "each gap's 'advisory_gaps' says which of its 'gaps' are on them) and, with fail-on = \"missing\", "
             "source builds. "
@@ -254,6 +263,11 @@ TOOLS: list[dict[str, Any]] = [
                 "offline": {
                     "type": "boolean",
                     "description": "Use only the files recorded in the lockfile; never contact the index.",
+                },
+                "dependencies": {
+                    "type": "boolean",
+                    "description": "Also resolve transitive dependencies of requirements files and pyproject.toml, "
+                    "as --deps does. Default: false. Refused for lockfiles, offline and another index.",
                 },
             },
             "required": ["path"],
@@ -452,18 +466,38 @@ def _lock_spec(args: dict[str, Any]) -> str:
     return str(Path(spec).expanduser())
 
 
-def _last_with_wheel(result: Result) -> dict[str, str] | None:
-    """By gap target no newer release has a wheel for, the newest older release with one, as --suggest finds it
-    (`last_with_wheel` in --explain --suggest --json). None when nothing was looked up: no gap, no version, another
-    index (which may hold private names, so --suggest looks nothing up there either) or a failed lookup."""
-    if not result.version or not result.gaps or origin.other_index() is not None:
-        return None
-    keep = [t for t, s in result.statuses.items() if s is Status.WHEEL]
-    key = canonicalize_name(result.name)
-    found, _ = release_suggest.look_up_all({key: [(result.version, result.gaps, keep)]})
-    if key not in found:
-        return None
-    return {t.label(True): v for t, v in found[key][0].last.items()}
+def _suggestions(results: list[Result]) -> dict[int, release_suggest.Suggestion]:
+    """--suggest's answers for every Result that pins a version and has a gap, by id(), from one look_up_all call
+    for the whole tree. Empty when nothing may be looked up: no such row, or another index (which may hold private
+    names, so --suggest looks nothing up there either). A failed or dropped lookup leaves the row's id out — the
+    answer says nothing about it, never a guess."""
+    if origin.other_index() is not None:
+        return {}
+    by_key: dict[str, list[tuple[str, list[Target], list[Target]]]] = {}
+    rows: dict[str, list[int]] = {}
+    for r in results:
+        # As --explain --suggest does (gap_targets): only source and missing targets, and no row whose lookup failed.
+        # An unknown target was never checked, so a way out for it would be a guess about a release that may be fine.
+        gaps = [t for t, s in r.statuses.items() if s in (Status.SOURCE, Status.MISSING)]
+        if r.version and gaps and r.error is None:
+            key = canonicalize_name(r.name)
+            # As version_suggestions does: a suggestion must keep a wheel on every target this row has one on.
+            keep = [t for t, s in r.statuses.items() if s is Status.WHEEL]
+            by_key.setdefault(key, []).append((r.version, gaps, keep))
+            rows.setdefault(key, []).append(id(r))
+    if not by_key:
+        return {}
+    wanted: release_suggest.Wanted = dict(by_key)  # look_up_all takes Sequences: dict values aren't covariant
+    found, _ = release_suggest.look_up_all(wanted)
+    return {i: s for key, ss in found.items() for i, s in zip(rows[key], ss, strict=True)}
+
+
+def _way_out(s: release_suggest.Suggestion) -> dict[str, dict[str, str]]:
+    """A looked-up row's suggest and last_with_wheel keys, labelled like results, as --explain --suggest --json."""
+    return {
+        "suggest": {t.label(True): v for t, v in s.found.items()},
+        "last_with_wheel": {t.label(True): v for t, v in s.last.items()},
+    }
 
 
 def _flag(args: dict[str, Any], key: str) -> bool:
@@ -536,6 +570,7 @@ def _check_package(args: dict[str, Any]) -> dict[str, Any]:
         out["versions"] = sorted({r.version for r in asked if r.version})
     out["ok"] = all(r.ok for r in asked) and all(r.ok for r in tree)
     out["gaps"] = list(dict.fromkeys(t.label(True) for r in asked for t in r.gaps))
+    ways = _suggestions([*asked, *tree])  # one look_up_all for the package and its whole tree
     if dependencies:
         out["dependencies_checked"] = len(tree)
         out["dependency_gaps"] = [
@@ -546,13 +581,22 @@ def _check_package(args: dict[str, Any]) -> dict[str, Any]:
                 "gaps": [t.label(True) for t in r.gaps],
                 "via": {t.label(True): list(path) for t, path in r.via.items()},
                 **({"issues_url": r.issues_url} if explain else {}),
+                **(_way_out(w) if (w := ways.get(id(r))) is not None else {}),
             }
             for r in tree
             if not r.ok
         ]
     out["targets"] = [t.label(True) for t in targets]
-    if (last := _last_with_wheel(result)) is not None:
-        out["last_with_wheel"] = last
+    # Every release the package resolved to, not just the first: each Python's gap targets are its own. If any row
+    # that was looked up has no answer, the keys are left out (one project page answers them all).
+    looked = [r for r in asked if r.version and r.error is None and any(s in (Status.SOURCE, Status.MISSING)
+                                                                        for s in r.statuses.values())]  # fmt: skip
+    if looked and all(id(r) in ways for r in looked):
+        merged: dict[str, dict[str, str]] = {"suggest": {}, "last_with_wheel": {}}
+        for r in looked:
+            for k, v in _way_out(ways[id(r)]).items():
+                merged[k].update(v)
+        out.update(merged)
     out["assumes"] = {
         "glibc": versions.get("glibc", DEFAULT_GLIBC),
         "musl": versions.get("musl", DEFAULT_MUSL),
@@ -564,6 +608,7 @@ def _check_package(args: dict[str, Any]) -> dict[str, Any]:
 def _check_lockfile(args: dict[str, Any]) -> dict[str, Any]:
     """Run the command line itself with --json, so config, notes and skipped packages are exactly the CLI's."""
     _check_keys("check_lockfile", args)
+    dependencies = _flag(args, "dependencies")
     raw = _string(args, "path", required=True) or ""
     offline = args.get("offline")
     if offline is not None and not isinstance(offline, bool):
@@ -581,6 +626,11 @@ def _check_lockfile(args: dict[str, Any]) -> dict[str, Any]:
         argv.append(f"--pyodide-lock={lock_spec}")
     if offline:
         argv.append("--offline")
+    if dependencies:
+        # The CLI writes a gap's 'via' only under --explain. Avoid --deps' automatic release suggestions and the
+        # tracker's notes (they'd send the tree's names to wheelgap.github.io); the tool needs the paths only, and
+        # _run_cli drops --explain's other keys.
+        argv += ["--deps", "--explain", "--no-suggest", "--no-notes"]
     return _run_cli(argv, path)
 
 
@@ -758,6 +808,11 @@ def _clip(text: str, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+_EXPLAIN_ONLY = frozenset(
+    {"rejected", "issues_url", "notes", "build_lab", "build_requires", "conda_forge", "suggest", "last_with_wheel"}
+)
+
+
 def _run_cli(argv: list[str], path: Path, *, positional: bool = True, project: Path | None = None) -> dict[str, Any]:
     """`wheelgap ARGV -- PATH` with --json in ARGV: its result as the lockfile tools return it. positional=False
     runs `wheelgap ARGV` with no input at all (check_dist: --dist takes none) and keeps PATH in the result; the
@@ -794,7 +849,17 @@ def _run_cli(argv: list[str], path: Path, *, positional: bool = True, project: P
         if cells:
             results = {label[cell]: status for cell, status in package["results"].items()}
             on_advisory = [cell for cell in cells if cell in advisory]
-            gaps.append(package | {"results": results, "gaps": cells, "advisory_gaps": on_advisory})
+            # The CLI omits the Python prefix with one Python; MCP always includes it.
+            # Apply the same label mapping to dependency paths, not just status cells.
+            context = {
+                key: {label.get(t, t): value for t, value in package[key].items()}
+                for key in ("via", "direct")
+                if key in package
+            }
+            # --explain's other keys (rejected wheels, tracker notes, build needs...) keep the CLI's short labels and
+            # aren't part of this tool's answer.
+            kept = {k: v for k, v in package.items() if k not in _EXPLAIN_ONLY}
+            gaps.append(kept | context | {"results": results, "gaps": cells, "advisory_gaps": on_advisory})
     # A bundled build at another version still passes, as in the CLI, but a pin micropip can't install must be said.
     differs = [p for p in data["packages"] if p.get("bundled_version_differs")]
     for p in differs:
