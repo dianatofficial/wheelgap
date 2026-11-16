@@ -1758,8 +1758,11 @@ def test_ignored_missing_with_counted_source_passes_fail_on_missing(capsys, fixt
     assert "2 of 5 packages have gaps: 2 will build from source." in out
     assert "can't install" not in out
     assert "Source builds are allowed (--fail-on missing), so this run passes." in out
-    assert "purewheel  3.1      ✓             ✓\n" in out  # a wheel on an ignored target isn't marked
-    assert "puresdist  1.0      ● source      ✗ missing (ignored)\n" in out
+    # The added "via" hints widen the package column; assert cells rather than fixed padding.
+    assert any(line.split() == ["purewheel", "3.1", "✓", "✓"] for line in out.splitlines())
+    assert any(
+        line.split() == ["puresdist", "1.0", "●", "source", "✗", "missing", "(ignored)"] for line in out.splitlines()
+    )
 
 
 def test_cell_marks_only_ignored_gaps():
@@ -3693,3 +3696,203 @@ def test_explain_issues_url_insecure_is_rejected(capsys, fake_pypi):
     data = json.loads(out)
     pkg = next(p for p in data["packages"] if p["name"] == "gapinsecure")
     assert pkg["issues_url"] is None
+
+
+def _write_transitive_table_lock(tmp_path, *, several=False, marked=False):
+    deps = ['{ name = "mcp" }']
+    if several:
+        deps.extend(['{ name = "requests" }', '{ name = "click" }'])
+    if marked:
+        deps.append('{ name = "platformer", marker = "sys_platform == \'win32\'" }')
+    text = (
+        "version = 1\n"
+        '[[package]]\nname = "app"\nversion = "1"\nsource = { editable = "." }\n'
+        f"dependencies = [{', '.join(deps)}]\n"
+    )
+    for name in ("mcp", "requests", "click", "platformer"):
+        if name != "mcp" and not (several or (marked and name == "platformer")):
+            continue
+        if name == "platformer" and not marked:
+            continue
+        text += (
+            f'[[package]]\nname = "{name}"\nversion = "1"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+            'dependencies = [{ name = "cryptography" }]\n'
+            f'wheels = [{{ url = "https://files.example/{name}-1-py3-none-any.whl" }}]\n'
+        )
+    text += (
+        '[[package]]\nname = "cryptography"\nversion = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n'
+    )
+    (tmp_path / "uv.lock").write_text(text, encoding="utf-8")
+
+
+@pytest.mark.parametrize("markdown", [False, True])
+def test_transitive_gap_table_names_its_direct_parent(capsys, tmp_path, fake_pypi, markdown):
+    _write_transitive_table_lock(tmp_path)
+    args = ["--markdown"] if markdown else []
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline", *args)
+    assert code == 1 and not err
+    assert "cryptography (via mcp)" in out
+    assert "mcp (via" not in out
+    assert fake_pypi == []
+
+
+@pytest.mark.parametrize("markdown", [False, True])
+def test_transitive_gap_table_counts_distinct_direct_parents(capsys, tmp_path, fake_pypi, markdown):
+    _write_transitive_table_lock(tmp_path, several=True)
+    args = ["--markdown"] if markdown else []
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline", *args)
+    assert code == 1 and not err
+    assert "cryptography (via mcp +2)" in out
+    assert fake_pypi == []
+
+
+def test_transitive_gap_table_respects_marker_and_selected_graph(capsys, tmp_path, fake_pypi):
+    _write_transitive_table_lock(tmp_path, marked=True)
+    for target, expected in (
+        ("linux-x86_64", "cryptography (via mcp)"),
+        ("win-amd64", "cryptography (via mcp +1)"),
+    ):
+        code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", target, "--no-dev", "--offline")
+        assert code == 1 and not err
+        assert expected in out
+    assert fake_pypi == []
+
+
+def test_transitive_gap_table_no_graph_quiet_and_json_unchanged(capsys, tmp_path, fake_pypi):
+    _write_transitive_table_lock(tmp_path)
+    base = (str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    code, out, _ = run(capsys, *base, "-q")
+    assert code == 1 and "via" not in out
+    code, out, _ = run(capsys, *base, "--json", "--explain")
+    assert code == 1
+    crypto = next(p for p in json.loads(out)["packages"] if p["name"] == "cryptography")
+    assert crypto["via"]["linux-x86_64"] == ["app", "mcp", "cryptography"]
+    assert "via_direct" not in crypto
+    code, out, _ = run(capsys, "nowheels", "-p", "3.13", "-t", "linux-x86_64")
+    assert code == 1 and "nowheels" in out and "(via " not in out
+    assert fake_pypi == ["https://pypi.org/pypi/nowheels/json"]
+
+
+def test_poetry_1x_transitive_gap_table_uses_direct_dependency(capsys, tmp_path, fake_pypi):
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "mcp"\nversion = "1"\n'
+        'files = [{ file = "mcp-1-py3-none-any.whl" }]\n'
+        '[package.dependencies]\ncryptography = "*"\n\n'
+        '[[package]]\nname = "cryptography"\nversion = "50.0.2"\n'
+        'files = [{ file = "cryptography-50.0.2.tar.gz" }]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via mcp)" in out
+    assert fake_pypi == []
+
+
+def test_a_failing_via_hint_never_costs_the_check(capsys, tmp_path, fake_pypi, monkeypatch):
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "mcp"\nversion = "1"\n'
+        'files = [{ file = "mcp-1-py3-none-any.whl" }]\n'
+        '[package.dependencies]\ncryptography = "*"\n\n'
+        '[[package]]\nname = "cryptography"\nversion = "50.0.2"\n'
+        'files = [{ file = "cryptography-50.0.2.tar.gz" }]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+
+    def broken(*args, **kwargs):
+        raise KeyError("a lockfile shape the hint code didn't expect")
+
+    monkeypatch.setattr("wheelgap.check.direct_dependencies", broken)
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography" in out and "(via" not in out
+
+
+def test_gap_directly_required_is_not_labelled_via(capsys, tmp_path, fake_pypi):
+    _write_transitive_table_lock(tmp_path)
+    lock = tmp_path / "uv.lock"
+    lock.write_text(
+        lock.read_text(encoding="utf-8").replace(
+            'dependencies = [{ name = "mcp" }]',
+            'dependencies = [{ name = "mcp" }, { name = "cryptography" }]',
+        ),
+        encoding="utf-8",
+    )
+    code, out, _ = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and "cryptography" in out and "cryptography (via" not in out
+    assert fake_pypi == []
+
+
+def test_selected_uv_extra_is_attributed_only_to_the_direct_requester(capsys, tmp_path, fake_pypi):
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        '[[package]]\nname = "app"\nversion = "1"\nsource = { editable = "." }\n'
+        'dependencies = [{ name = "mcp" }, { name = "plain" }]\n'
+        '[[package]]\nname = "mcp"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "shared", extra = ["crypto"] }]\n'
+        'wheels = [{ url = "https://files.example/mcp-1-py3-none-any.whl" }]\n'
+        '[[package]]\nname = "plain"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "shared" }]\n'
+        'wheels = [{ url = "https://files.example/plain-1-py3-none-any.whl" }]\n'
+        '[[package]]\nname = "shared"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+        'wheels = [{ url = "https://files.example/shared-1-py3-none-any.whl" }]\n'
+        '[package.optional-dependencies]\ncrypto = [{ name = "cryptography" }]\n'
+        '[[package]]\nname = "cryptography"\nversion = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "--no-dev", "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via mcp)" in out
+    assert "cryptography (via mcp +1)" not in out
+    assert fake_pypi == []
+
+
+def test_default_uv_extra_is_attributed_only_to_the_direct_requester(capsys, tmp_path, fake_pypi):
+    # With no --extra/--group/--no-dev the hint walks extras per owner too: shared[crypto] is only mcp's.
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        '[[package]]\nname = "app"\nversion = "1"\nsource = { editable = "." }\n'
+        'dependencies = [{ name = "plain" }, { name = "mcp" }]\n'
+        '[[package]]\nname = "mcp"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "shared", extra = ["crypto"] }]\n'
+        'wheels = [{ url = "https://files.example/mcp-1-py3-none-any.whl" }]\n'
+        '[[package]]\nname = "plain"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "shared" }]\n'
+        'wheels = [{ url = "https://files.example/plain-1-py3-none-any.whl" }]\n'
+        '[[package]]\nname = "shared"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+        'wheels = [{ url = "https://files.example/shared-1-py3-none-any.whl" }]\n'
+        '[package.optional-dependencies]\ncrypto = [{ name = "cryptography" }]\n'
+        '[[package]]\nname = "cryptography"\nversion = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via mcp)" in out
+    assert "via plain" not in out and "(via mcp +1)" not in out
+    assert fake_pypi == []
+
+
+def test_poetry_extra_edge_credits_nobody(capsys, tmp_path, fake_pypi):
+    # Poetry's graph doesn't record which parent asked for an extra, so a package behind one gets no (via ...) hint.
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "plain"\nversion = "1"\n'
+        'files = [{ file = "plain-1-py3-none-any.whl" }]\n'
+        '[package.dependencies]\nshared = "*"\n\n'
+        '[[package]]\nname = "shared"\nversion = "1"\n'
+        'files = [{ file = "shared-1-py3-none-any.whl" }]\n'
+        '[package.dependencies]\ncryptography = { version = "*", optional = true, markers = \'extra == "crypto"\' }\n\n'
+        '[[package]]\nname = "cryptography"\nversion = "50.0.2"\n'
+        'files = [{ file = "cryptography-50.0.2.tar.gz" }]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert "via plain" not in out

@@ -41,6 +41,14 @@ inputs:
       updated. Leave it empty for the default token (github-actions[bot]) or a personal token (its user).
     required: false
     default: ""
+  dist:
+    description: >
+      A folder with the wheels and sdist about to be uploaded (e.g. "dist", after `uv build` or
+      `python -m build`), passed to wheelgap as --dist: runs the release gate instead of a lockfile check, so the
+      job fails when the release drops a platform the previous release had a wheel for. args then takes flags
+      only, e.g. "-p 3.13 -t win-arm64,linux-aarch64", and dist can't be combined with compare-to.
+    required: false
+    default: ""
 
 outputs:
   report:
@@ -55,25 +63,38 @@ runs:
       shell: bash
       env:
         WHEELGAP_ARGS: ${{ inputs.args }}
+        WHEELGAP_DIST: ${{ inputs.dist }}
         WHEELGAP_SUMMARY: ${{ inputs.summary }}
         FORCE_COLOR: "1"
       # WHEELGAP_ARGS is deliberately unquoted so it splits into separate arguments.
       run: |
         set +e
+        fail() { echo "::error::wheelgap: $1"; exit 2; }
+        dist=$WHEELGAP_DIST
+        case "$dist" in
+          -* | /* | .. | ../* | */.. | */../*) fail "dist must be a folder in the checkout, such as dist" ;;
+        esac
+        if [ -n "$dist" ] && [ ! -d "$dist" ]; then
+          fail "dist isn't a folder in the checkout; the build step (uv build or python -m build) should make it"
+        fi
         # --github-annotations marks each gap on its lockfile line in the PR diff. It goes first, like the summary
         # run's flags, so a `--` in args can't turn it into a package name; but `diff` must stay the first argument
-        # to run `wheelgap diff`, which has no annotations.
+        # to run `wheelgap diff`, which has no annotations. --dist has no input file to annotate either.
         set -- $WHEELGAP_ARGS
         annotate=--github-annotations
         [ "${1:-}" = diff ] && annotate=
-        pipx run --spec "$GITHUB_ACTION_PATH" wheelgap $annotate $WHEELGAP_ARGS
+        if [ -n "$dist" ]; then
+          set -- --dist "$dist" "$@"
+          annotate=
+        fi
+        pipx run --spec "$GITHUB_ACTION_PATH" wheelgap $annotate "$@"
         code=$?
         # The summary is a second, never-failing run; the step's result is the real run's exit code.
         # Exit code 2 means bad input, which the log above already explains. The extra flags go first
         # so a `--` in args can't turn them into package names, and only a real Markdown report is
         # appended (not help, --version or --list-targets output).
         if [ "$WHEELGAP_SUMMARY" = "true" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ "$code" -le 1 ]; then
-          report=$(pipx run --spec "$GITHUB_ACTION_PATH" wheelgap --markdown --no-quiet --exit-zero $WHEELGAP_ARGS 2>/dev/null) \
+          report=$(pipx run --spec "$GITHUB_ACTION_PATH" wheelgap --markdown --no-quiet --exit-zero "$@" 2>/dev/null) \
             && [[ "$report" == "### wheelgap"* ]] && printf '%s\n' "$report" >> "$GITHUB_STEP_SUMMARY"
         fi
         exit "$code"
@@ -84,6 +105,7 @@ runs:
       shell: bash
       env:
         WHEELGAP_ARGS: ${{ inputs.args }}
+        WHEELGAP_DIST: ${{ inputs.dist }}
         WHEELGAP_SUMMARY: ${{ inputs.summary }}
         WHEELGAP_COMPARE_TO: ${{ inputs.compare-to }}
         WHEELGAP_COMMENT: ${{ inputs.comment }}
@@ -99,6 +121,7 @@ runs:
         unset WHEELGAP_TOKEN  # only gh gets the token, not wheelgap or Python
         # fail's messages are fixed text: they never quote args, refs or anything else a pull request could set.
         fail() { echo "::error::wheelgap: $1"; exit 2; }
+        [ -z "$WHEELGAP_DIST" ] || fail "dist can't be combined with compare-to; they run different checks"
         sha='^[0-9a-f]{40}([0-9a-f]{24})?$'
         comment=$(printf '%s' "$WHEELGAP_COMMENT" | tr '[:upper:]' '[:lower:]')
         case "$comment" in

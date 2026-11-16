@@ -31,6 +31,8 @@ def release(requires=(), files=(ANY,), requires_python=None, yanked=False, sdist
 # wheel; on Windows lib also needs winonly.
 INDEX = {
     "app": {"1.0": release(["lib[crypto]>=1"])},
+    "parenta": {"1.0": release(["crypt>=1"])},
+    "parentb": {"1.0": release(["crypt>=1"])},
     "plain": {"1.0": release(["lib>=1"])},
     "lib": {
         "1.0": release(),
@@ -497,3 +499,50 @@ def test_deps_doesnt_turn_suggest_on_for_a_lockfile_among_the_inputs(index, caps
     main(["tool==1.0", str(lock), "--deps", "--explain", "-p", "3.14", "-t", "win-arm64", "--no-cache"])
     capsys.readouterr()
     assert not [u for u in index if "secretpkg" in u]
+
+
+def test_deps_tables_count_distinct_direct_requirements(index, capsys):
+    for display in ([], ["--markdown"]):
+        code = main(["parenta", "parentb", "--deps", "-p", "3.14", "-t", "win-arm64", *display])
+        output = capsys.readouterr().out
+        assert code == 1
+        assert "crypt (via parenta +1)" in output
+    assert index
+
+
+def test_deps_json_keeps_original_path(index, capsys):
+    code = main(["parenta", "parentb", "--deps", "-p", "3.14", "-t", "win-arm64", "--json"])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 1
+    crypt = next(p for p in output["packages"] if p["name"] == "crypt")
+    assert "via_direct" not in crypt
+
+
+def test_deps_extra_only_labels_the_requesting_direct_root(index, capsys):
+    for display in ([], ["--markdown"]):
+        code = main(["app", "plain", "--deps", "-p", "3.14", "-t", "win-arm64", *display])
+        output = capsys.readouterr().out
+        assert code == 1
+        assert "crypt (via app)" in output
+        assert "crypt (via app +1)" not in output
+    assert index
+
+
+def test_deps_direct_origins_preserve_roots_across_multiple_targets(index, capsys):
+    code = main(
+        [
+            "parenta",
+            "parentb",
+            "--deps",
+            "-p",
+            "3.14",
+            "-t",
+            "win-arm64",
+            "-t",
+            "linux-x86_64",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "crypt (via parenta +1)" in out
+    assert index

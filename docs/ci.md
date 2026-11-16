@@ -24,6 +24,7 @@ drops ARM wheels. The gap table also goes to the run's summary page.
 | `comment` | `"false"` | with `compare-to`: also post one pull request comment when something got worse, and edit it on later runs |
 | `github-token` | `${{ github.token }}` | the token for the pull request comment |
 | `comment-author` | `""` | the login the token comments as, such as `my-app[bot]`, for a GitHub App's token |
+| `dist` | `""` | after 0.11.0: a folder like `dist` with the release about to be uploaded, run as `--dist` instead of a lockfile check; see [below](#before-a-release) |
 
 The Action also has a `report` output: with `compare-to`, the path of the Markdown report that went to the job
 summary.
@@ -203,11 +204,17 @@ Windows on ARM wheels that every release since 46.0.0 had:
 ```yaml
 - name: Build
   run: uv build
-- name: Check the upload
-  run: uvx wheelgap@latest --dist dist -p 3.13 -t win-arm64,linux-aarch64,musl-aarch64
+- uses: wheelgap/wheelgap@main  # a release after 0.11.0, once there is one
+  with:
+    dist: dist
+    args: -p 3.13 -t win-arm64,linux-aarch64,musl-aarch64
 - name: Publish
   run: uv publish  # or twine upload dist/*
 ```
+
+`dist` runs `--dist` on the folder (no lockfile in `args`), writes the table to the job summary and fails the job
+on a drop, so the upload step never runs. `uvx wheelgap@latest --dist dist -p 3.13 -t ...` is the same check
+outside GitHub Actions.
 
 A project tag like `cp313` still checks every `-t` platform, so pass the targets you ship to, not just the
 interpreter you built with. Missing-wheel targets land as `source` (the sdist builds) or `missing` (no sdist); the

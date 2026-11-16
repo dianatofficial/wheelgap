@@ -325,6 +325,50 @@ def pinned_complete(source: Source) -> bool:
     )
 
 
+def _direct_roots(
+    tree: _Tree, roots: list[Requirement], resolver: Resolver, target: Target
+) -> dict[str, tuple[str, ...]]:
+    """Attribute a resolved package to the direct requirements that actually requested it.
+
+    Traverse each root's active extras independently. A shared package requested with an
+    extra by one root must not make its optional dependencies look like the other root's.
+    Metadata is cached by Resolver.requires from the resolution pass.
+    """
+    owners: dict[str, dict[str, str]] = {}
+    direct: set[str] = set()
+    seen: dict[tuple[str, str], frozenset[str]] = {}
+    queue: deque[tuple[Requirement, frozenset[str], str, str]] = deque()
+    for root in roots:
+        if root.marker is not None and not marker_holds(str(root.marker), target):
+            continue
+        key = canonicalize_name(root.name)
+        direct.add(key)
+        queue.append((root, frozenset(), key, resolver.names.get(key, root.name)))
+
+    while queue:
+        req, parent_extras, owner, label = queue.popleft()
+        if req.marker is not None and not marker_holds(str(req.marker), target, extras=parent_extras):
+            continue
+        key = canonicalize_name(req.name)
+        if key not in tree.chosen:
+            continue
+        owners.setdefault(key, {})[owner] = label
+        wanted = frozenset(canonicalize_name(extra) for extra in req.extras)
+        state = (key, owner)
+        previous = seen.get(state)
+        if previous is not None and wanted <= previous:
+            continue
+        seen[state] = wanted if previous is None else previous | wanted
+        if key in tree.errors:
+            continue
+        try:
+            requirements = resolver.requires(key, tree.chosen[key], target)
+        except Exception:
+            continue  # Resolver already recorded the metadata error; hints must not change results
+        queue.extend((child, seen[state], owner, label) for child in requirements)
+    return {key: tuple(labels.values()) for key, labels in owners.items() if key not in direct}
+
+
 def resolve_deps(source: Source, targets: list[Target], resolver: Resolver | None = None) -> None:
     """Replace the source's packages with what its requirements install on each target."""
     resolver = resolver or Resolver()
@@ -335,9 +379,12 @@ def resolve_deps(source: Source, targets: list[Target], resolver: Resolver | Non
     packages: list[Package] = list(kept)
     index: dict[tuple[str, str | None, str | None], int] = {}
     deps_paths: dict[Target, dict[int, list[str]]] = {}
+    deps_direct: dict[Target, dict[int, tuple[str, ...]]] = {}
     for target in targets:
         tree = resolver.resolve(roots, target, constraints=source.constraint_specs)
         reach: dict[int, list[str]] = {}
+        direct: dict[int, tuple[str, ...]] = {}
+        direct_names = _direct_roots(tree, roots, resolver, target)
         for key, path in tree.paths.items():
             version, error = tree.chosen.get(key), tree.errors.get(key)
             if version is None and error is None:
@@ -351,7 +398,10 @@ def resolve_deps(source: Source, targets: list[Target], resolver: Resolver | Non
             if version is not None and error is not None:
                 packages[i].error = error  # its dependencies couldn't be read: unknown, not a clean bill
             reach[i] = path
+            if origin_names := direct_names.get(key):
+                direct[i] = tuple(resolver.names.get(name, name) for name in origin_names)
         deps_paths[target] = reach
+        deps_direct[target] = direct
     if source.requirements:
         if fc := source.format_control:  # --no-binary/--only-binary lines apply to the resolved packages too
             for p in packages:
@@ -359,3 +409,4 @@ def resolve_deps(source: Source, targets: list[Target], resolver: Resolver | Non
                     p.no_binary, p.only_binary = fc.policy(p.key)
     source.packages = packages
     source.deps_paths = deps_paths
+    source.deps_direct = deps_direct

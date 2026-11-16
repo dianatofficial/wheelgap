@@ -44,6 +44,7 @@ STUBS = {
 env | grep -q {TOKEN} && echo pipx >> "$LEAK_FILE"
 [ -n "${{PIPX_FAIL:-}}" ] && {{ echo "pipx: failed to install" >&2; exit 1; }}
 [ -n "${{PIPX_INJECT:-}}" ] && printf '::error::pwned\\nnote ##[warning]x\\r::add-mask::y\\n' >&2
+printf '%s\\n' "$*" >> "${{PIPX_LOG:-/dev/null}}"
 shift 4  # run --spec PATH wheelgap
 exec "$PYTHON_REAL" -c '
 import os
@@ -148,6 +149,7 @@ def run(origin, tmp_path):
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_SHA": origin["merge"],
             "WHEELGAP_ARGS": ARGS,
+            "WHEELGAP_DIST": "",
             "WHEELGAP_SUMMARY": "true",
             "WHEELGAP_COMPARE_TO": "base",
             "WHEELGAP_COMMENT": "false",
@@ -436,3 +438,144 @@ def test_args_are_not_globbed(run):
 def test_summary_false_skips_the_summary_but_not_the_output(run):
     r = run(WHEELGAP_SUMMARY="false")
     assert r["code"] == 1 and r["summary"] == "" and r["output"].startswith("report=")
+
+
+def run_step_script() -> str:
+    """The first step's `run: |` block — the lockfile or --dist check — dedented."""
+    lines = (ROOT / "action.yml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("    - name: Run wheelgap")
+    run = next(i for i in range(start, len(lines)) if lines[i] == "      run: |")
+    body = []
+    for line in lines[run + 1 :]:
+        if line and not line.startswith("        "):
+            break
+        body.append(line[8:])
+    return "\n".join(body) + "\n"
+
+
+@pytest.fixture
+def run_step(tmp_path):
+    """Run the first step (the lockfile/--dist check, no git needed) in a work folder, with stubs on PATH."""
+    work = tmp_path / "work"
+    work.mkdir()
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, text in STUBS.items():
+        (stubs / name).write_text(text, encoding="utf-8")
+        (stubs / name).chmod(0o755)
+    (tmp_path / "step.sh").write_text(run_step_script(), encoding="utf-8")
+
+    def go(**overrides):
+        out = tmp_path / "out"
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir()
+        env = {
+            "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+            "HOME": str(tmp_path),
+            "PYTHON_REAL": sys.executable,
+            "LEAK_FILE": str(out / "leaks"),
+            "PYPI_LOG": str(out / "pypi.log"),
+            "PIPX_LOG": str(out / "pipx.log"),
+            "GITHUB_ACTION_PATH": str(ROOT),
+            "GITHUB_STEP_SUMMARY": str(out / "summary"),
+            "WHEELGAP_ARGS": "-p 3.13 -t linux-x86_64,musl-aarch64",
+            "WHEELGAP_DIST": "",
+            "WHEELGAP_SUMMARY": "true",
+        }
+        env.update(overrides)
+        done = subprocess.run(
+            ["bash", "-e", str(tmp_path / "step.sh")], cwd=work, env=env, capture_output=True, text=True
+        )
+        assert not (out / "leaks").exists(), "the token reached pipx or python"
+
+        def read(name):
+            path = out / name
+            return path.read_text(encoding="utf-8") if path.exists() else ""
+
+        return {
+            "code": done.returncode,
+            "log": done.stdout + done.stderr,
+            "summary": read("summary"),
+            "pipx": read("pipx.log").splitlines(),
+            "pypi": read("pypi.log").splitlines(),
+            "work": work,
+        }
+
+    go.work = work  # type: ignore[attr-defined]
+    return go
+
+
+def build_dist(work, *names):
+    for name in names:
+        (work / "dist").mkdir(exist_ok=True)
+        (work / "dist" / name).write_bytes(b"")
+
+
+def test_dist_fails_the_job_on_a_dropped_platform(run_step):
+    build_dist(
+        run_step.work,
+        "armlib-2.0-cp313-cp313-manylinux_2_17_x86_64.whl",
+        "armlib-2.0.tar.gz",
+    )
+    r = run_step(WHEELGAP_DIST="dist", STUB_RELEASES="1")
+    assert r["code"] == 1, r["log"]
+    assert "musl-aarch64: 1.6.0 had a wheel, this release has none" in r["log"]
+    assert "### wheelgap" in r["summary"] and "had a wheel, this release has none" in r["summary"]
+    assert r["pypi"] == ["https://pypi.org/pypi/armlib/json"] * 2  # check + summary run, nothing else
+    # Both runs take --dist, and --dist has no input file to annotate.
+    assert r["pipx"] and all("--dist dist" in call and "--github-annotations" not in call for call in r["pipx"])
+
+
+def test_dist_passes_when_every_target_keeps_its_wheel(run_step):
+    build_dist(
+        run_step.work,
+        "armlib-2.0-cp313-cp313-manylinux_2_17_x86_64.whl",
+        "armlib-2.0-cp313-cp313-musllinux_1_2_aarch64.whl",
+        "armlib-2.0.tar.gz",
+    )
+    r = run_step(WHEELGAP_DIST="dist", STUB_RELEASES="1")
+    assert r["code"] == 0, r["log"]
+    assert "had a wheel" not in r["log"] and "### wheelgap" in r["summary"]
+
+
+def test_dist_when_the_previous_release_lookup_fails(run_step):
+    build_dist(
+        run_step.work,
+        "armlib-2.0-cp313-cp313-manylinux_2_17_x86_64.whl",
+        "armlib-2.0-cp313-cp313-musllinux_1_2_aarch64.whl",
+    )
+    r = run_step(WHEELGAP_DIST="dist")  # no STUB_RELEASES: the stub answers no index URL
+    assert r["code"] == 0, r["log"]
+    assert "dropped-target check didn't run" in r["log"]
+
+
+@pytest.mark.parametrize(
+    "dist, says",
+    [
+        ("-x", "dist must be a folder in the checkout"),
+        ("/etc", "dist must be a folder in the checkout"),
+        ("../out", "dist must be a folder in the checkout"),
+        ("build/../../out", "dist must be a folder in the checkout"),
+        ("..", "dist must be a folder in the checkout"),
+        ("missing", "isn't a folder in the checkout"),
+    ],
+)
+def test_dist_refusals(run_step, dist, says):
+    r = run_step(WHEELGAP_DIST=dist)
+    assert r["code"] == 2
+    assert r["log"].startswith("::error::wheelgap: ") and says in r["log"].splitlines()[0]
+    assert r["pipx"] == [] and r["summary"] == ""
+
+
+def test_dist_rejects_a_lockfile_in_args(run_step):
+    build_dist(run_step.work, "armlib-2.0.tar.gz")
+    r = run_step(WHEELGAP_DIST="dist", WHEELGAP_ARGS="uv.lock -p 3.13 -t linux")
+    assert r["code"] == 2 and "takes no other inputs" in r["log"]
+
+
+def test_dist_and_compare_to_are_refused(run):
+    r = run(WHEELGAP_DIST="dist")
+    assert r["code"] == 2
+    assert r["log"].startswith("::error::wheelgap: ") and "can't be combined with compare-to" in r["log"]
+    assert r["summary"] == "" and r["gh"] == []

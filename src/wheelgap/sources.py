@@ -203,6 +203,8 @@ class Source:
     # --deps (deps.py): per target, the packages installed and the dependency path to each, keyed by index into
     # `packages`. check() uses it in place of a lockfile's graph.
     deps_paths: dict[Target, dict[int, list[str]]] | None = None
+    # --deps: all distinct direct requirements that reach each transitive package, per target.
+    deps_direct: dict[Target, dict[int, tuple[str, ...]]] | None = None
 
 
 def pythons_outside_lock(source: Source, targets: Iterable[Target], *, bounds_only: bool = True) -> list[str]:
