@@ -678,6 +678,14 @@ def test_check_package_issues_url_none_for_other_index(fake_pypi, monkeypatch):
     assert result.to_dict(explain=True)["issues_url"] is None
 
 
+def test_check_package_issues_url_none_with_pip_index_url(fake_pypi, monkeypatch):
+    monkeypatch.setenv("PIP_INDEX_URL", "https://other.example.com/simple")
+    targets = wheelgap.make_targets(python="3.13", platforms="linux-x86_64")
+    result = wheelgap.check_package("gapwithissues", "1.0", targets=targets)
+    assert result.issues_url is None
+    assert result.to_dict(explain=True)["issues_url"] is None
+
+
 def test_check_lockfile_issues_url(fake_pypi, tmp_path):
     (tmp_path / "uv.lock").write_text(LOCK_ABI3, encoding="utf-8")
     targets = wheelgap.make_targets(python="3.13", platforms="linux-x86_64")
