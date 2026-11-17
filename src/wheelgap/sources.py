@@ -2308,6 +2308,7 @@ def load_inputs(inputs: list[str], environment: str | None = None) -> list[Sourc
     return sources
 
 
+# A pixi environment often has 100+ conda packages: past this many, text and Markdown count them (--json lists them).
 CONDA_LISTED = 5
 
 

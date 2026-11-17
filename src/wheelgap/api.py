@@ -416,9 +416,10 @@ def check_lockfile(
     as --deps does: one Result per package in the tree, with `via` giving each gap target's path from a direct
     dependency. A tree that can't be resolved raises DepsError (a SourceError). With deps=True, pyproject.toml
     (and a project directory containing only one) is accepted; lockfile inputs (uv.lock, poetry.lock, ...) and
-    offline=True are refused. Requirements that aren't index packages (-e ., local paths, URLs) cannot be
-    resolved from PyPI; with deps=True, any such requirement raises SourceError unless allow_skipped=True is passed
-    to ignore them.
+    offline=True are refused. Requirements that aren't index packages (-e ., local paths, URLs) can't be
+    resolved from PyPI: with deps=True they raise SourceError, unless the file is compiled with hashes (it already
+    pins what they install) or allow_skipped=True is passed to check the rest. allow_skipped does nothing without
+    deps=True.
     With offline=True, only locked files are used: inputs needing an index lookup raise SourceError, and the
     other-Python recheck is skipped. Locked files may therefore omit wheels for those Python versions.
     online=True and offline=True cannot be combined.
@@ -495,13 +496,13 @@ def _check_lockfile(
                 f"{source.label}: {env} may point pip or uv at another index, and --deps uses only PyPI, "
                 "so check a lockfile instead"
             )
-        if not allow_skipped and (skipped := [p for p in source.packages if p.skip]):
-            names = skipped_list(skipped)
-            raise SourceError(
-                f"{source.label}: requirements contain non-index package(s) that cannot be resolved with "
-                f"deps=True ({names}); pass allow_skipped=True to ignore them, or check a lockfile"
-            )
         if not pinned_complete(source):
+            # A compiled file already pins what these install; anything else would be resolved without them.
+            if not allow_skipped and (skipped := [p for p in source.packages if p.skip]):
+                raise SourceError(
+                    f"{source.label}: deps=True can't check what non-index packages install: "
+                    f"{skipped_list(skipped)}; pass allow_skipped=True to check the rest, or check a lockfile"
+                )
             if source.deps_blockers:
                 raise SourceError(
                     f"{source.label}: --deps can't follow this the way pip does ({source.deps_blockers[0]}), "
