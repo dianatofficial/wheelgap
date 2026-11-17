@@ -78,6 +78,7 @@ check_lockfile(
     pyodide_locks=(),
     environment=None,
     deps=False,
+    allow_skipped=False,
 )
 ```
 
@@ -93,7 +94,8 @@ lock's files if a lookup fails).
   (no extras). It's refused where `--deps` refuses: lockfiles, `offline=True`, a project or environment that names
   another index, and requirement files pip would follow differently (a `SourceError` saying so). A requirements
   file that already pins everything with hashes is checked as written. Requirements that aren't index packages
-  (`-e .`, a path, a URL) aren't resolved, so what they install isn't checked.
+  (`-e .`, a path, a URL) aren't resolved; with `deps=True`, any such requirement raises `SourceError` unless
+  `allow_skipped=True` is passed to ignore them.
 - `online=True` re-checks the lockfile's packages on the index, as `--online` does.
 - `offline=True` never contacts an index: it raises `wheelgap.sources.SourceError` if an input has no locked file
   list, and skips the re-check for Python versions outside the lock's `requires-python` (so those versions may show

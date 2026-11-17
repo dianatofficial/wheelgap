@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python API: `check_lockfile(..., deps=True)` refuses non-index requirements (`-e .`, paths, URLs) with a `SourceError` naming them unless `allow_skipped=True` is passed to ignore them. (#454)
+
 - `wheelgap diff PKG==OLD PKG==NEW --deps` resolves both releases' dependency trees from PyPI per target and compares them as it compares two lockfiles. (#474, thanks [@AdityaSreevatsaK](https://github.com/AdityaSreevatsaK))
 - `wheelgap diff` names the direct dependency that brings in a new or worse transitive gap (`cryptography (via mcp) 50.0.2 (new)`), in the text report and the Action's PR comment, and `--json` adds `direct` per target. (#473, thanks [@AdityaSreevatsaK](https://github.com/AdityaSreevatsaK))
 - `--fix` lists the gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills, with how to install it: a `pyproject.toml` snippet for a uv.lock (and which packages to also list as direct dependencies, since uv applies `[tool.uv.sources]` only to direct ones), or the `--extra-index-url` line for pip. Only for packages positively from PyPI, exactly the checked version and a wheel the target accepts; it reads the list in one request that names no package, and never changes the exit code. `--json` gets a `gap_wheels` key. (#472, thanks [@patrickballard](https://github.com/patrickballard))

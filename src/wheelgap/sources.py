@@ -6,7 +6,7 @@ import json
 import re
 import shlex
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -2306,3 +2306,15 @@ def load_inputs(inputs: list[str], environment: str | None = None) -> list[Sourc
     if environment is not None and not any(s.kind == "pixi" for s in sources):
         raise SourceError("--environment applies to pixi.lock inputs only")
     return sources
+
+
+CONDA_LISTED = 5
+
+
+def skipped_list(skipped: list[Package], name: Callable[[str], str] = str) -> str:
+    """Each skipped package and why, with more than CONDA_LISTED conda packages counted rather than listed."""
+    conda = sum(1 for p in skipped if p.skip == "conda")
+    items = [f"{name(p.name)} ({p.skip})" for p in skipped if p.skip != "conda" or conda <= CONDA_LISTED]
+    if conda > CONDA_LISTED:
+        items.append(f"{conda} conda packages (not on PyPI)")
+    return ", ".join(items)

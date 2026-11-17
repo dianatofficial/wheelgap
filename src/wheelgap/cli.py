@@ -66,6 +66,7 @@ from .sources import (
     pythons_outside_lock,
     select_pyproject_extras,
     select_uv_dependencies,
+    skipped_list,
     uv_selected_roots,
 )
 from .suggest_targets import render_text as render_target_suggestions
@@ -1307,19 +1308,6 @@ def render_markdown(
             if sug_lines:
                 out += [*sug_lines, ""]
     return out
-
-
-# A pixi environment often has 100+ conda packages: past this many, text and Markdown count them (--json lists them).
-CONDA_LISTED = 5
-
-
-def skipped_list(skipped: list[Package], name: Callable[[str], str] = str) -> str:
-    """Each skipped package and why, with more than CONDA_LISTED conda packages counted rather than listed."""
-    conda = sum(1 for p in skipped if p.skip == "conda")
-    items = [f"{name(p.name)} ({p.skip})" for p in skipped if p.skip != "conda" or conda <= CONDA_LISTED]
-    if conda > CONDA_LISTED:
-        items.append(f"{conda} conda packages (not on PyPI)")
-    return ", ".join(items)
 
 
 def ignored_list(ignored: list[tuple[str, list[str] | None]], name: Callable[[str], str] = str) -> str:

@@ -858,3 +858,56 @@ def test_check_lockfile_deps_uses_no_on_disk_cache(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("app==1.0\n", encoding="utf-8")
     wheelgap.check_lockfile(tmp_path / "requirements.txt", [WIN], deps=True)
     assert made == [{}]
+
+
+@pytest.mark.usefixtures("index")
+def test_check_lockfile_deps_refuses_non_index_requirements(tmp_path):
+    # -e . (editable requirement)
+    req_editable = tmp_path / "req_editable.txt"
+    req_editable.write_text("-e .\napp==1.0\n", encoding="utf-8")
+    with pytest.raises(SourceError) as e:
+        wheelgap.check_lockfile(req_editable, [WIN], deps=True)
+    assert "requirements contain non-index package(s) that cannot be resolved with deps=True" in str(e.value)
+    assert ". (editable)" in str(e.value)
+    assert "pass allow_skipped=True to ignore them, or check a lockfile" in str(e.value)
+
+    # Direct URL requirement
+    req_url = tmp_path / "req_url.txt"
+    req_url.write_text("https://example.org/foo-1.0.tar.gz\napp==1.0\n", encoding="utf-8")
+    with pytest.raises(SourceError) as e:
+        wheelgap.check_lockfile(req_url, [WIN], deps=True)
+    assert "requirements contain non-index package(s) that cannot be resolved with deps=True" in str(e.value)
+    assert "https://example.org/foo-1.0.tar.gz (url)" in str(e.value)
+    assert "pass allow_skipped=True to ignore them, or check a lockfile" in str(e.value)
+
+    # Both editable and URL requirements
+    req_both = tmp_path / "req_both.txt"
+    req_both.write_text("-e .\nhttps://example.org/foo-1.0.tar.gz\napp==1.0\n", encoding="utf-8")
+    with pytest.raises(SourceError) as e:
+        wheelgap.check_lockfile(req_both, [WIN], deps=True)
+    assert ". (editable)" in str(e.value)
+    assert "https://example.org/foo-1.0.tar.gz (url)" in str(e.value)
+
+
+@pytest.mark.usefixtures("index")
+def test_check_lockfile_deps_allow_skipped_resolves_index_packages(tmp_path):
+    # With allow_skipped=True, non-index requirements are ignored and index packages are resolved
+    req_editable = tmp_path / "req_editable.txt"
+    req_editable.write_text("-e .\napp==1.0\n", encoding="utf-8")
+    res_editable = wheelgap.check_lockfile(req_editable, [WIN, LIN], deps=True, allow_skipped=True)
+    rows_editable = {r.name: r for r in res_editable}
+    assert sorted(rows_editable) == ["app", "crypt", "lib", "winonly"]
+    assert rows_editable["crypt"].statuses == {WIN: Status.SOURCE, LIN: Status.WHEEL}
+
+    req_url = tmp_path / "req_url.txt"
+    req_url.write_text("https://example.org/foo-1.0.tar.gz\napp==1.0\n", encoding="utf-8")
+    res_url = wheelgap.check_lockfile(req_url, [WIN, LIN], deps=True, allow_skipped=True)
+    rows_url = {r.name: r for r in res_url}
+    assert sorted(rows_url) == ["app", "crypt", "lib", "winonly"]
+    assert rows_url["crypt"].statuses == {WIN: Status.SOURCE, LIN: Status.WHEEL}
+
+    # allow_skipped=True on inputs with no skipped packages works normally
+    req_clean = tmp_path / "req_clean.txt"
+    req_clean.write_text("app==1.0\n", encoding="utf-8")
+    res_clean = wheelgap.check_lockfile(req_clean, [WIN, LIN], deps=True, allow_skipped=True)
+    assert sorted(r.name for r in res_clean) == ["app", "crypt", "lib", "winonly"]
