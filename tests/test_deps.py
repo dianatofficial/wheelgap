@@ -796,6 +796,54 @@ def test_deps_json_explain_direct_extra_only_names_the_requester(index, capsys):
     assert crypt["direct"] == {"win-arm64": ["app"]}
 
 
+def test_deps_names_the_direct_requirement_of_a_package_whose_lookup_failed(index, monkeypatch, capsys, tmp_path):
+    # #453: "flaky" can't be looked up, so it's unknown, but the table and --junit still name what pulls it in.
+    monkeypatch.setitem(INDEX, "usesflaky", {"1.0": release(["flaky"])})
+    monkeypatch.setitem(INDEX, "alsoflaky", {"1.0": release(["flaky"])})
+    fetch_json = pypi.fetch_json
+
+    def failing(url, *args, **kwargs):
+        if url.startswith(f"{pypi.index_url()}/flaky/"):
+            raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)  # type: ignore[arg-type]
+        return fetch_json(url, *args, **kwargs)
+
+    monkeypatch.setattr(pypi, "fetch_json", failing)
+    roots = [Requirement("usesflaky"), Requirement("c")]
+    resolver = Resolver()
+    tree = resolver.resolve(roots, WIN)
+    assert "flaky" in tree.errors and "flaky" not in tree.chosen
+    assert deps._direct_roots(tree, roots, resolver, WIN) == {"flaky": ("usesflaky",)}
+    for display in ([], ["--markdown"]):
+        args = ["usesflaky", "c", "--deps", "-p", "3.14", "-t", "win-arm64", "--no-cache", "--color", "never"]
+        assert main([*args, *display]) == 1
+        assert "flaky (via usesflaky)" in capsys.readouterr().out
+    report = tmp_path / "report.xml"
+    assert main([*args, "--junit", str(report)]) == 1
+    capsys.readouterr()
+    assert "(via usesflaky)" in report.read_text(encoding="utf-8")
+    both = [Requirement("usesflaky"), Requirement("alsoflaky")]
+    tree = resolver.resolve(both, WIN)
+    assert sorted(deps._direct_roots(tree, both, resolver, WIN)["flaky"]) == ["alsoflaky", "usesflaky"]
+    # The GitHub annotation names the owner and sits on its line, as a transitive gap's does.
+    (tmp_path / "requirements.txt").write_text("c\nusesflaky\n", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    files = [str(tmp_path / "requirements.txt"), "--deps", "-p", "3.14", "-t", "win-arm64", "--no-cache"]
+    assert main([*files, "--github-annotations"]) == 1
+    (line,) = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("::") and "title=flaky" in ln]
+    assert line.startswith("::error file=requirements.txt,line=2,") and "(via usesflaky)" in line
+
+
+def test_deps_names_the_direct_requirement_of_a_package_with_no_release_for_the_python(index, monkeypatch):
+    # #453: "toonew" has no release for 3.14, so it's never chosen, but it still gets its owner.
+    monkeypatch.setitem(INDEX, "toonew", {"1.0": release(requires_python=">=3.15")})
+    monkeypatch.setitem(INDEX, "usestoonew", {"1.0": release(["toonew"])})
+    roots = [Requirement("usestoonew")]
+    resolver = Resolver()
+    tree = resolver.resolve(roots, WIN)
+    assert "toonew" in tree.errors and "toonew" not in tree.chosen
+    assert deps._direct_roots(tree, roots, resolver, WIN) == {"toonew": ("usestoonew",)}
+
+
 def test_diff_deps_detects_a_new_transitive_gap_on_upgrade(index, monkeypatch, capsys):
     from wheelgap.diff import main as diff_main
 
