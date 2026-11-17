@@ -28,6 +28,7 @@ from .build import BuildInfo, describe, lookup_all, requires_for, shown
 from .check import (
     CELL,
     EXPLAIN_LIMIT,
+    HINTED,
     Row,
     Status,
     check,
@@ -709,6 +710,12 @@ def gap_targets(row: Row, targets: list[Target]) -> list[Target]:
     return [t for t in targets if row.results[t] in (Status.SOURCE, Status.MISSING) and t not in row.ignored]
 
 
+def traced_targets(row: Row, targets: list[Target]) -> list[Target]:
+    """The gap targets plus those where the package couldn't be looked up (unknown): what --json --explain's `via`
+    and `direct` trace to the user's own requirements (#453)."""
+    return [t for t in targets if row.results[t] in HINTED and t not in row.ignored]
+
+
 RowNotes = dict[int, list[tuple[tracker.Note, list[Target]]]]
 """The tracker's notes that apply to a row's gaps, keyed by id(row), each with the gap targets it covers."""
 RowBuilds = dict[int, list[tuple[Target, tracker.Build]]]
@@ -978,13 +985,15 @@ def report_json(
                 ]
                 for t in gap_targets(r, targets)
             }
-            # Same targets as `rejected`, minus any without a path (inputs with no dependency graph).
-            out["via"] = {t.label(multi_py): r.via[t] for t in gap_targets(r, targets) if t in r.via}
-            # The direct dependencies that lead to each gap target, as the table's `(via ...)` names them; only where
-            # the input says (uv.lock, Poetry 1.x, --deps), so `{}` for a direct dependency or an input without a graph.
+            # The gap targets and those where the lookup failed (unknown), minus any without a path (inputs with no
+            # dependency graph).
+            out["via"] = {t.label(multi_py): r.via[t] for t in traced_targets(r, targets) if t in r.via}
+            # The direct dependencies that lead to each of those targets, as the table's `(via ...)` names them; only
+            # where the input says (uv.lock, Poetry 1.x, --deps), so `{}` for a direct dependency or an input without
+            # a graph.
             out["direct"] = {
                 t.label(multi_py): list(dict.fromkeys(r.direct_via[t]))
-                for t in gap_targets(r, targets)
+                for t in traced_targets(r, targets)
                 if r.direct_via.get(t)
             }
             if gap_wheels is not None:

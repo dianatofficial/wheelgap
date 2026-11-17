@@ -52,6 +52,9 @@ from .targets import (
 
 _OK = (Status.WHEEL, Status.NOT_NEEDED, Status.BUNDLED)
 _EXPLAINED = (Status.SOURCE, Status.MISSING)  # the statuses --explain explains
+# The statuses --explain traces to the user's own requirements (via, direct): the gaps, and a package that couldn't be
+# looked up, which is the row a user most needs to trace (#453).
+_TRACED = (*_EXPLAINED, Status.UNKNOWN)
 
 
 def running_python() -> str:
@@ -94,7 +97,8 @@ class Result:
     # version is outside the requested pin or range (the package still counts as ok).
     bundled_version: str | None = None
     bundled_version_differs: bool = False
-    # Per SOURCE or MISSING target, the dependency path from a root down to this package, as --explain shows it:
+    # Per SOURCE, MISSING or UNKNOWN target, the dependency path from a root down to this package, as --explain
+    # shows it:
     # ("app", "pandas", "numpy"), or ("(dev group)", "pytest") for a dependency group. Filled for inputs with a
     # dependency graph: uv.lock and poetry.lock before lock-version 2.1, and anything checked with deps=True.
     via: dict[Target, tuple[str, ...]] = field(default_factory=dict)
@@ -108,7 +112,7 @@ class Result:
     _resolutions: ClassVar[Mapping[str, Package]] = MappingProxyType({})
     # Each applicable Pyodide lock may ship a different version for its Python.
     bundled_versions: dict[str, str] = field(default_factory=dict)
-    # The direct dependencies that lead to each gap target, as the table's (via ...) names them.
+    # The direct dependencies that lead to each gap target (or unknown one), as the table's (via ...) names them.
     # Only check_lockfile() and check_packages(deps=True) fill it, and only for inputs with a dependency graph.
     direct: dict[Target, tuple[str, ...]] = field(default_factory=dict)
     issues_url: str | None = None
@@ -171,8 +175,8 @@ class Result:
     def to_dict(self, explain: bool = False) -> dict[str, object]:
         """JSON-friendly, keyed by target label. explain=True adds "rejected", "via", "direct" and "issues_url" as
         `wheelgap --json --explain` does: each SOURCE or MISSING target's rejected wheels as {"file", "reason"}
-        objects, its dependency path where there is one, the direct dependencies that lead to each gap, and the
-        package's issue tracker URL."""
+        objects, its dependency path where there is one and the direct dependencies that lead to it (for UNKNOWN
+        targets too), and the package's issue tracker URL."""
         out: dict[str, object] = {
             "name": self.name,
             "version": self.version,
@@ -245,7 +249,7 @@ def _result(
         # Preserve the legacy scalar only when all applied locks agree.
         shared_version,
         any(bundled_version_differs(pkg, lock) for lock in applied),
-        {t: tuple(via[t]) for t, s in statuses.items() if s in _EXPLAINED and t in via},
+        {t: tuple(via[t]) for t, s in statuses.items() if s in _TRACED and t in via},
         # A file's yanked flag and its Requires-Python reason are the same for every Python, so these are the union.
         frozenset(f for variant in pkg.variants for f in variant.yanked),
         {f: why for variant in pkg.variants for f, why in variant.requires_python_rejected.items()},
@@ -253,7 +257,7 @@ def _result(
         pkg.only_binary,
         bundled_versions=bundled_versions,
         direct={
-            t: tuple(dict.fromkeys(direct_via[t])) for t, s in statuses.items() if s in _EXPLAINED and direct_via.get(t)
+            t: tuple(dict.fromkeys(direct_via[t])) for t, s in statuses.items() if s in _TRACED and direct_via.get(t)
         },
         issues_url=issues_url,
     )
