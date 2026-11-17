@@ -269,8 +269,8 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--piwheels",
         action="store_true",
-        help="with --explain, also say when piwheels has a wheel of the same version for a Raspberry Pi gap "
-        "(sends the names of PyPI packages with gaps to piwheels.org)",
+        help="with --explain, also say when piwheels has a wheel of the same version for a linux-armv7l (Raspberry "
+        "Pi) gap (sends the names of PyPI packages with gaps to piwheels.org)",
     )
     p.add_argument(
         "--deps",
@@ -832,8 +832,8 @@ def render_explain(
             out.append("")
         if conda_forge and (h := conda_forge.get(id(r.package))):
             out += [condaforge.hint_text(r.package, h, multi_py), ""]
-        if pi_wheels and (h := pi_wheels.get(id(r.package))):
-            out += [piwheels.hint_text(r.package, h, multi_py), ""]
+        if pi_wheels and (pw := pi_wheels.get(id(r.package))):
+            out += [piwheels.hint_text(r.package, pw, multi_py), ""]
         for note, ts in (notes or {}).get(id(r), []):
             # Printed as is: a note is one line of plain text (tracker.parse). It can't hold a GitHub Actions workflow
             # command either: tracker.parse drops a note with "##[" or a word starting with "::", and the text never
@@ -999,11 +999,12 @@ def report_json(
                     "version": h.version,
                     "builds": {t.label(multi_py): subdirs for t, subdirs in h.builds.items()},
                 }
-            if pi_wheels and (h := pi_wheels.get(id(r.package))):
+            if pi_wheels and (pw := pi_wheels.get(id(r.package))):
                 out["piwheels"] = {
-                    "name": h.name,
-                    "version": h.version,
-                    "wheels": {t.label(multi_py): ws for t, ws in h.wheels.items()},
+                    "name": pw.name,
+                    "version": pw.version,
+                    "wheels": {t.label(multi_py): ws for t, ws in pw.wheels.items()},
+                    "apt": pw.apt,
                 }
             # The tracker's notes for this package's gaps, each with the gap targets it covers.
             out["notes"] = [

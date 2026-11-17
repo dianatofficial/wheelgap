@@ -248,10 +248,10 @@
                     }
                 },
                 "piwheels": {
-                    "description": "Present with --explain --piwheels, when piwheels has a wheel of this version that fits at least one of the targets in rejected (for linux-armv7l and linux-aarch64). A hint only: it doesn't change results, summary or the exit code. Left out when nothing fits, the package's index isn't known to be PyPI (its name isn't sent), or the lookup failed (a note on stderr says so).",
+                    "description": "Present with --explain --piwheels, when piwheels has a wheel of this version that fits at least one of the targets in rejected (only linux-armv7l is looked up: piwheels has no aarch64 wheels). A hint only: it doesn't change results, summary or the exit code. Left out when nothing fits, the package's index isn't known to be PyPI (its name isn't sent), or the lookup failed (a note on stderr says so).",
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["name", "version", "wheels"],
+                    "required": ["name", "version", "wheels", "apt"],
                     "properties": {
                         "name": {"type": "string", "description": "The canonical package name that was looked up on piwheels.org."},
                         "version": {"type": "string", "description": "The checked version, which every wheel counted is of."},
@@ -259,6 +259,11 @@
                             "type": "object",
                             "description": "For each target label with a wheel that fits: the matching wheel filenames from piwheels.",
                             "additionalProperties": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "apt": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "The Raspberry Pi OS (apt) packages piwheels lists as needed by those wheels, sorted, each once; empty when it lists none."
                         }
                     }
                 },

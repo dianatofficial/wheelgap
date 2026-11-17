@@ -136,7 +136,9 @@ FAKE_CONDA_FORGE: dict[str, list[dict] | Exception] = {
 }
 
 
-def piwheels_file(filename: str, builder_abi: str = "cp313", platform: str = "linux_armv7l") -> dict:
+def piwheels_file(
+    filename: str, builder_abi: str = "cp313", platform: str = "linux_armv7l", apt: list[str] | None = None
+) -> dict:
     return {
         "file_url": f"/simple/{filename.split('-')[0]}/{filename}",
         "filehash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -145,7 +147,7 @@ def piwheels_file(filename: str, builder_abi: str = "cp313", platform: str = "li
         "file_abi_tag": "none",
         "platform": platform,
         "requires_python": None,
-        "apt_dependencies": [],
+        "apt_dependencies": apt or [],
         "pip_dependencies": [],
     }
 
@@ -171,13 +173,14 @@ FAKE_PIWHEELS: dict[str, dict | Exception] = {
                 "skip_reason": "",
                 "files": {
                     "nowheels-0.9-cp313-cp313-linux_armv7l.whl": piwheels_file(
-                        "nowheels-0.9-cp313-cp313-linux_armv7l.whl", "cp313", "linux_armv7l"
+                        "nowheels-0.9-cp313-cp313-linux_armv7l.whl", "cp313", "linux_armv7l", ["libc6", "libssl3"]
                     ),
-                    "nowheels-0.9-cp313-cp313-linux_aarch64.whl": piwheels_file(
-                        "nowheels-0.9-cp313-cp313-linux_aarch64.whl", "cp313", "linux_aarch64"
+                    # piwheels' armv6l builds, for Raspberry Pi Zero and 1: no armv7l target accepts them.
+                    "nowheels-0.9-cp313-cp313-linux_armv6l.whl": piwheels_file(
+                        "nowheels-0.9-cp313-cp313-linux_armv6l.whl", "cp313", "linux_armv6l", ["libc6", "libssl3"]
                     ),
                     "nowheels-0.9-cp312-cp312-linux_armv7l.whl": piwheels_file(
-                        "nowheels-0.9-cp312-cp312-linux_armv7l.whl", "cp312", "linux_armv7l"
+                        "nowheels-0.9-cp312-cp312-linux_armv7l.whl", "cp312", "linux_armv7l", ["libssl3", "libc6"]
                     ),
                 },
             },

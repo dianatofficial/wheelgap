@@ -5,12 +5,14 @@ So it never changes a status, the summary or the exit code.
 
 A wheel counts for a target when:
 - it's of the checked version, in a release that isn't yanked;
-- its filename is a valid wheel filename whose tags the target accepts (target.accepts()).
+- its filename is a valid wheel filename of this package and version, whose tags the target accepts (target.accepts()).
+
+piwheels builds for Raspberry Pi OS (32-bit armv6l/armv7l, plus pure-Python wheels): it has no aarch64 wheels, so only
+linux-armv7l gaps are looked up.
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 import urllib.error
@@ -19,6 +21,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import quote
 
+from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 from . import cache, pypi
@@ -38,8 +41,9 @@ TOO_LARGE_ANSWER = f"answer too large (over {MAX_BYTES // (1024 * 1024)} MB)"
 FAILED = "no usable answer"
 DROPPED = "not asked: piwheels.org couldn't be reached, or was too slow"
 
-# wheelgap platform targets piwheels can build wheels for: Raspberry Pi 32-bit (armv7l) and 64-bit (aarch64).
-PLATFORMS = {"linux-armv7l", "linux-aarch64"}
+# wheelgap platform targets piwheels has wheels for: its platform tags are linux_armv6l and linux_armv7l (and none for
+# pure Python), so 64-bit Raspberry Pi OS (aarch64) isn't one.
+PLATFORMS = {"linux-armv7l"}
 
 
 class Unreachable(Exception):
@@ -58,8 +62,23 @@ def _same_version(a: str, b: str) -> bool:
         return a == b
 
 
-def parse_wheels(data: object, version: str) -> list[str]:
-    """The wheel filenames of `version`, from a piwheels.org package JSON answer."""
+def _of_release(filename: str, key: str, version: str) -> bool:
+    """A valid wheel filename of this package and version."""
+    try:
+        name, ver, _, _ = parse_wheel_filename(filename)
+        return canonicalize_name(name) == canonicalize_name(key) and ver == Version(version)
+    except ValueError:  # InvalidWheelFilename, InvalidVersion
+        return False
+
+
+def _apt(info: dict) -> list[str]:
+    deps = info.get("apt_dependencies")
+    return [d for d in deps if isinstance(d, str)] if isinstance(deps, list) else []
+
+
+def parse_wheels(data: object, key: str, version: str) -> dict[str, list[str]]:
+    """The wheels of `key` `version` from a piwheels.org package JSON answer: each filename with the apt packages
+    piwheels says it needs."""
     if not isinstance(data, dict):
         raise ValueError("unexpected response")
     releases = data.get("releases")
@@ -68,13 +87,13 @@ def parse_wheels(data: object, version: str) -> list[str]:
     for rel_ver, rel in releases.items():
         if isinstance(rel_ver, str) and _same_version(rel_ver, version):
             if not isinstance(rel, dict) or rel.get("yanked"):
-                return []
+                return {}
             files = rel.get("files")
             if not isinstance(files, dict):
-                return []
-            valid = []
+                return {}
+            valid: dict[str, list[str]] = {}
             for filename, info in files.items():
-                if not (isinstance(filename, str) and filename.endswith(".whl") and isinstance(info, dict)):
+                if not (isinstance(filename, str) and _of_release(filename, key, version) and isinstance(info, dict)):
                     continue
                 if not (
                     isinstance(info.get("file_url"), str)
@@ -82,9 +101,9 @@ def parse_wheels(data: object, version: str) -> list[str]:
                     and isinstance(info.get("platform"), str)
                 ):
                     continue
-                valid.append(filename)
+                valid[filename] = _apt(info)
             return valid
-    return []
+    return {}
 
 
 def fits(wheel: str, target: Target) -> bool:
@@ -95,14 +114,14 @@ def fits(wheel: str, target: Target) -> bool:
     return bool(tags) and any(target.accepts(t) for t in tags)
 
 
-def fetch(key: str, version: str) -> list[str] | str | None:
-    """Ask piwheels.org: the wheel filenames of `version` ([] for no such package, version, or wheels),
+def fetch(key: str, version: str) -> dict[str, list[str]] | str | None:
+    """Ask piwheels.org: parse_wheels()'s answer ({} for no such package, version, or wheels),
     TOO_LARGE, or None for an answer that can't be used (403, 429, 5xx, too slow, damaged).
     Raises Unreachable when piwheels.org can't be reached."""
     try:
         data = pypi.fetch_json(f"{API}/{quote(key, safe='')}/json/", timeout=TIMEOUT, attempts=1, max_bytes=MAX_BYTES)
     except urllib.error.HTTPError as e:
-        return [] if e.code == 404 else None  # only a 404 says there's no such package
+        return {} if e.code == 404 else None  # only a 404 says there's no such package
     except pypi.ResponseTooLarge:
         return TOO_LARGE
     except urllib.error.URLError as e:
@@ -110,12 +129,14 @@ def fetch(key: str, version: str) -> list[str] | str | None:
     except Exception:
         return None
     try:
-        return parse_wheels(data, version)
+        return parse_wheels(data, key, version)
     except ValueError:
         return None
 
 
-def look_up(key: str, version: str, read_cache: bool = False, write_cache: bool = False) -> list[str] | str | None:
+def look_up(
+    key: str, version: str, read_cache: bool = False, write_cache: bool = False
+) -> dict[str, list[str]] | str | None:
     """fetch(), through the 24-hour cache. Answers (wheels, none, too large) are cached; failures aren't."""
     if read_cache and (cached := cache.load_piwheels(key, version)) is not None:
         return cached
@@ -127,7 +148,7 @@ def look_up(key: str, version: str, read_cache: bool = False, write_cache: bool 
 
 @dataclass
 class Lookups:
-    found: dict[tuple[str, str], list[str]]  # (name, version) -> wheel filenames
+    found: dict[tuple[str, str], dict[str, list[str]]]  # (name, version) -> wheel filename -> apt packages
     unchecked: dict[str, str]  # name -> why it has no usable answer: TOO_LARGE, FAILED or DROPPED
     stopped: bool  # piwheels.org couldn't be reached, or deadline passed
 
@@ -135,11 +156,12 @@ class Lookups:
 def look_up_all(
     wanted: Iterable[tuple[str, str]], read_cache: bool = False, write_cache: bool = False, deadline: float = DEADLINE
 ) -> Lookups:
-    """Look up each (name, version), at most WORKERS at a time. The first lookup that can't reach piwheels.org stops
-    the rest, and so does the deadline. Workers are daemon threads, so a stalled request can't hold up the run's exit."""
+    """Look up each (name, version), at most WORKERS at a time. The first lookup that can't reach piwheels.org
+    stops the rest, and so does the deadline. Workers are daemon threads, so a stalled request can't hold up the
+    run's exit."""
     todo: deque[tuple[str, str]] = deque(dict.fromkeys(wanted))
     asked = list(todo)
-    results: dict[tuple[str, str], list[str] | str | None] = {}
+    results: dict[tuple[str, str], dict[str, list[str]] | str | None] = {}
     lock = threading.Lock()
     finished, stop = threading.Event(), threading.Event()
 
@@ -168,7 +190,7 @@ def look_up_all(
         finished.wait(max(0.0, deadline - (time.monotonic() - start)))
         stop.set()
     with lock:
-        found = {item: r for item, r in results.items() if isinstance(r, list)}
+        found = {item: r for item, r in results.items() if isinstance(r, dict)}
         unchecked: dict[str, str] = {}
         for item in asked:
             if item not in found:
@@ -184,9 +206,10 @@ class Hint:
     name: str  # canonical package name
     version: str  # checked version
     wheels: dict[Target, list[str]]  # gap target -> list of matching wheel filenames
+    apt: list[str]  # the apt packages piwheels lists for those wheels, sorted, each once
 
 
-def hint(pkg: Package, targets: Iterable[Target], found: dict[tuple[str, str], list[str]]) -> Hint | None:
+def hint(pkg: Package, targets: Iterable[Target], found: dict[tuple[str, str], dict[str, list[str]]]) -> Hint | None:
     """The hint for a package's gap targets, or None when no wheel fits any of them. The caller checks that the
     package is PyPI's (origin.known_pypi)."""
     if not pkg.version or not (wheels := found.get((pkg.key, pkg.version))):
@@ -196,7 +219,10 @@ def hint(pkg: Package, targets: Iterable[Target], found: dict[tuple[str, str], l
         matching = [w for w in wheels if fits(w, t)]
         if matching:
             matched[t] = matching
-    return Hint(pkg.key, pkg.version, matched) if matched else None
+    if not matched:
+        return None
+    apt = sorted({dep for ws in matched.values() for w in ws for dep in wheels[w]})
+    return Hint(pkg.key, pkg.version, matched, apt)
 
 
 def hint_text(pkg: Package, h: Hint, multi_py: bool) -> str:

@@ -269,23 +269,43 @@ It's only a hint, so it never changes a status, the summary or the exit code: a 
 
 ### piwheels hint {#piwheels}
 
-`--piwheels` adds a hint to `--explain` (it needs `--explain`): for a package with a gap on a Raspberry Pi target
-(`linux-armv7l` or `linux-aarch64`), it asks [piwheels.org](https://www.piwheels.org/) whether piwheels has a wheel
-of the same version whose tags the target accepts. For example,
-`wheelgap cryptography==50.0.2 -t linux-armv7l --explain --piwheels` adds:
+`--piwheels` adds a hint to `--explain` (it needs `--explain`): for a package with a gap on `linux-armv7l` (32-bit
+Raspberry Pi OS), it asks [piwheels.org](https://www.piwheels.org/) whether piwheels has a wheel of the same version
+whose tags the target accepts. piwheels has no aarch64 wheels, so no other target is looked up. For example, PyPI has
+no armv7l wheel of numpy 2.5.4, and `wheelgap numpy==2.5.4 -p 3.13 -t linux-armv7l --explain --piwheels` adds:
 
 ```text
-piwheels has cryptography 50.0.2 for linux-armv7l: --extra-index-url https://www.piwheels.org/simple
+piwheels has numpy 2.5.4 for linux-armv7l: --extra-index-url https://www.piwheels.org/simple
 ```
 
 A wheel fits when all of these hold:
 - It's of the checked version, in a release that isn't yanked.
+- Its filename is a valid wheel filename of this package and version.
 - Its wheel tags are accepted by the target (`target.accepts()`).
 
-Targets that are not Raspberry Pi platforms never match. With `--json --explain`, the package gets a `piwheels` object:
-`"piwheels": {"name": "cryptography", "version": "50.0.2", "wheels": {"linux-armv7l": ["cryptography-50.0.2-cp313-abi3-linux_armv7l.whl"]}}`.
+With `--json --explain`, the package gets a `piwheels` object, with the apt packages piwheels lists for those wheels,
+each once:
+`"piwheels": {"name": "numpy", "version": "2.5.4", "wheels": {"linux-armv7l": ["numpy-2.5.4-cp313-cp313-linux_armv7l.whl"]}, "apt": ["libc6", "libgcc-s1", "libgfortran5", "libopenblas0-pthread", "libstdc++6"]}`.
 
 It's only a hint, so it never changes a status, the summary or the exit code.
+
+- **Not from PyPI.** piwheels builds its wheels on Raspberry Pi OS from the PyPI sdist; they aren't from the
+  package's maintainers. A wheel that links to system libraries needs the apt packages piwheels lists for it
+  (`sudo apt install ...`; the `apt` list in `--json`, or the package's page on piwheels.org), and may not work on
+  another armv7l distribution.
+- **With a uv lockfile.** `--extra-index-url` is for pip. For `uv.lock`, add piwheels as an explicit index and send
+  only the package, and only on armv7l, to it (as with the gap wheel index, `[tool.uv.sources]` applies to direct
+  dependencies only, so list the package in `dependencies` too):
+
+  ```toml
+  [[tool.uv.index]]
+  name = "piwheels"
+  url = "https://www.piwheels.org/simple"
+  explicit = true
+
+  [tool.uv.sources]
+  numpy = { index = "piwheels", marker = "platform_machine == 'armv7l'" }
+  ```
 
 - **Which names are sent.** Without the flag nothing is looked up. With it, only names that pass
   [the PyPI-origin rule](how-it-works.md#pypi-origin) are sent to piwheels.org; a note on stderr names the others. A

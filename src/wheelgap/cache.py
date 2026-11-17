@@ -1,6 +1,7 @@
 """A small on-disk cache of pinned index lookups (/<name>/<version>/json), so a repeat run needn't ask again,
 of --deps' wheel metadata files (each release's Requires-Dist), of --conda-forge lookups (a version's conda-forge
-builds, cut down to what matching needs), of --notes lookups (the coverage tracker's notes and build lab results for
+builds, cut down to what matching needs), of --piwheels lookups (a version's piwheels wheel filenames and the apt
+packages each needs), of --notes lookups (the coverage tracker's notes and build lab results for
 a package), of --build-info answers (what a release's sdist says about its build), and of --fix's gap wheel list (the
 whole document, once gapwheels.parse has accepted it).
 
@@ -157,18 +158,18 @@ def save_builds(name: str, version: str, builds: list[dict] | str) -> None:
 PIWHEELS_KEY = "piwheels-v1 https://www.piwheels.org/project"
 
 
-def load_piwheels(name: str, version: str) -> list[str] | str | None:
-    """--piwheels: the cached wheel filenames of a version ([] for none), TOO_LARGE, or None: not cached, older than
-    MAX_AGE, or unreadable."""
+def load_piwheels(name: str, version: str) -> dict[str, list[str]] | str | None:
+    """--piwheels: the cached wheels of a version (filename -> apt packages, {} for none), TOO_LARGE, or None: not
+    cached, older than MAX_AGE, or unreadable."""
     wheels = _load(PIWHEELS_KEY, name, version, "wheels")
     if wheels == TOO_LARGE:
         return TOO_LARGE
-    if isinstance(wheels, list) and all(isinstance(w, str) for w in wheels):
+    if isinstance(wheels, dict) and all(isinstance(w, str) and _strings(apt) for w, apt in wheels.items()):
         return wheels
     return None
 
 
-def save_piwheels(name: str, version: str, wheels: list[str] | str) -> None:
+def save_piwheels(name: str, version: str, wheels: dict[str, list[str]] | str) -> None:
     _save(PIWHEELS_KEY, name, version, "wheels", wheels)
 
 

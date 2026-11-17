@@ -32,14 +32,15 @@ uv run --group dev pytest
 | `targets.py` | Targets (Python × platform) and the wheel tags each accepts |
 | `check.py` | The status per package and target (`wheel`, `source`, `missing`, `unknown`, `n/a`, `bundled`) and `--explain` reasons |
 | `pypi.py` | The only HTTP client (`fetch_json`: retries, https-only redirects; `fetch_sdist_pyproject` reads an sdist's `pyproject.toml` as pip would) and the PyPI lookups (`fill`, `fill_all`, `recheck_lock`) |
-| `cache.py` | The 24-hour on-disk cache of pinned PyPI lookups, `--conda-forge` lookups, the tracker's notes, `--build-info` answers and the `--fix` gap wheel list (`--no-cache` and `--online` skip it) |
+| `cache.py` | The 24-hour on-disk cache of pinned PyPI lookups, `--conda-forge` and `--piwheels` lookups, the tracker's notes, `--build-info` answers and the `--fix` gap wheel list (`--no-cache` and `--online` skip it) |
 | `build.py` | `--explain --build-info`: what a `source` build needs, from the `[build-system]` table of the sdist's `pyproject.toml` (read with `pypi.fetch_sdist_pyproject`) |
 | `dockerfile.py` | `--dockerfile`: reads the final stage's image and platform the way Docker/BuildKit does |
 | `suggest_targets.py` | `--suggest-targets`: targets and Pythons read from GitHub Actions workflows (only files whose every line is in a small, strict subset of YAML) and Dockerfiles |
 | `offline.py` | `--offline`, `offline = true` and `check_lockfile(..., offline=True)`: refuse inputs that would need an index lookup |
 | `pyodide.py` | `--pyodide-lock`: packages Pyodide ships itself |
 | `condaforge.py` | `--conda-forge`: under `--explain`, whether conda-forge has a build of the same package and version that fits a gap's target (anaconda.org, through `pypi.fetch_json`) |
-| `origin.py` | `known_pypi`: whether a package is positively PyPI's, so its name may go to another service (`--conda-forge`, `--notes`); never for private-index names |
+| `piwheels.py` | `--piwheels`: under `--explain`, whether piwheels has a wheel of the same package and version that fits a `linux-armv7l` gap (piwheels.org, through `pypi.fetch_json`) |
+| `origin.py` | `known_pypi`: whether a package is positively PyPI's, so its name may go to another service (`--conda-forge`, `--piwheels`, `--notes`); never for private-index names |
 | `notes.py` | `--explain`: the [coverage tracker](https://wheelgap.github.io/tracker/)'s notes for packages with gaps, opt-in with `--notes`, looked up only for names `origin.known_pypi` accepts (from `uv.lock` and `pylock.toml` for a registry), never with `--offline`, `--index-url` or a `WHEELGAP_INDEX_URL` mirror |
 | `gapwheels.py` | `--fix`: which gaps a wheel on wheelgap's gap wheel index fills (the list from `pypi.fetch_gap_wheels`, each entry checked and dropped whole if malformed), and how to install from the index; only for names `origin.known_pypi` accepts, never with `--offline`, `--index-url` or a mirror |
 | `github.py` | `--github-annotations`: GitHub Actions `::error`/`::warning` lines, and each package's line in its input file |

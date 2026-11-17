@@ -2270,6 +2270,8 @@ def _assert_matches_output_schema(data):
             assert pkg["conda_forge"]["builds"] and set(pkg["conda_forge"]["builds"]) <= set(pkg["rejected"])
             assert all(pkg["conda_forge"]["builds"].values())
         if "piwheels" in pkg:  # a hint for some of the targets in rejected, never an empty one
+            assert set(pkg["piwheels"]) == {"name", "version", "wheels", "apt"}
+            assert all(isinstance(a, str) for a in pkg["piwheels"]["apt"])
             assert pkg["piwheels"]["wheels"] and set(pkg["piwheels"]["wheels"]) <= set(pkg["rejected"])
             assert all(pkg["piwheels"]["wheels"].values())
         for note in pkg.get("notes", []):
