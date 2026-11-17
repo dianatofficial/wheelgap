@@ -808,7 +808,17 @@ def _clip(text: str, limit: int = 200) -> str:
 
 
 _EXPLAIN_ONLY = frozenset(
-    {"rejected", "issues_url", "notes", "build_lab", "build_requires", "conda_forge", "suggest", "last_with_wheel"}
+    {
+        "rejected",
+        "issues_url",
+        "notes",
+        "build_lab",
+        "build_requires",
+        "conda_forge",
+        "piwheels",
+        "suggest",
+        "last_with_wheel",
+    }
 )
 
 

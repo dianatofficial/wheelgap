@@ -136,6 +136,67 @@ FAKE_CONDA_FORGE: dict[str, list[dict] | Exception] = {
 }
 
 
+def piwheels_file(filename: str, builder_abi: str = "cp313", platform: str = "linux_armv7l") -> dict:
+    return {
+        "file_url": f"/simple/{filename.split('-')[0]}/{filename}",
+        "filehash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "filesize": 123456,
+        "builder_abi": builder_abi,
+        "file_abi_tag": "none",
+        "platform": platform,
+        "requires_python": None,
+        "apt_dependencies": [],
+        "pip_dependencies": [],
+    }
+
+
+def piwheels_data(name: str, releases: dict[str, dict]) -> dict:
+    return {
+        "package": name,
+        "summary": f"{name} on piwheels",
+        "pypi_url": f"https://pypi.org/project/{name}/",
+        "piwheels_url": f"https://www.piwheels.org/project/{name}/",
+        "releases": releases,
+    }
+
+
+FAKE_PIWHEELS: dict[str, dict | Exception] = {
+    "nowheels": piwheels_data(
+        "nowheels",
+        {
+            "0.9": {
+                "released": "2026-10-01 12:00:00",
+                "prerelease": False,
+                "yanked": False,
+                "skip_reason": "",
+                "files": {
+                    "nowheels-0.9-cp313-cp313-linux_armv7l.whl": piwheels_file(
+                        "nowheels-0.9-cp313-cp313-linux_armv7l.whl", "cp313", "linux_armv7l"
+                    ),
+                    "nowheels-0.9-cp313-cp313-linux_aarch64.whl": piwheels_file(
+                        "nowheels-0.9-cp313-cp313-linux_aarch64.whl", "cp313", "linux_aarch64"
+                    ),
+                    "nowheels-0.9-cp312-cp312-linux_armv7l.whl": piwheels_file(
+                        "nowheels-0.9-cp312-cp312-linux_armv7l.whl", "cp312", "linux_armv7l"
+                    ),
+                },
+            },
+            "0.8": {
+                "released": "2026-09-01 12:00:00",
+                "prerelease": False,
+                "yanked": False,
+                "skip_reason": "",
+                "files": {
+                    "nowheels-0.8-cp313-cp313-linux_armv7l.whl": piwheels_file(
+                        "nowheels-0.8-cp313-cp313-linux_armv7l.whl", "cp313", "linux_armv7l"
+                    ),
+                },
+            },
+        },
+    ),
+}
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: a timing test (skip it locally with -m 'not slow')")
 
@@ -322,6 +383,15 @@ def fake_pypi(monkeypatch, tracker):
             if isinstance(conda, Exception):
                 raise conda
             return {"files": conda}
+        if url.startswith("https://www.piwheels.org/project/"):
+            assert max_bytes is not None, "piwheels.org answers can be large: cap them"
+            name = url.removeprefix("https://www.piwheels.org/project/").split("/")[0]
+            piw = FAKE_PIWHEELS.get(name)
+            if piw is None:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            if isinstance(piw, Exception):
+                raise piw
+            return piw
         # Served at whatever WHEELGAP_INDEX_URL points at, so tests can assert which index was asked.
         parts = url.removeprefix(pypi.index_url() + "/").removesuffix("/json").split("/")
         name = parts[0]

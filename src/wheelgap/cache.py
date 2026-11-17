@@ -153,6 +153,25 @@ def save_builds(name: str, version: str, builds: list[dict] | str) -> None:
     _save(CONDA_FORGE_KEY, name, version, "builds", builds)
 
 
+# --piwheels entries: keyed apart from PyPI's, and versioned.
+PIWHEELS_KEY = "piwheels-v1 https://www.piwheels.org/project"
+
+
+def load_piwheels(name: str, version: str) -> list[str] | str | None:
+    """--piwheels: the cached wheel filenames of a version ([] for none), TOO_LARGE, or None: not cached, older than
+    MAX_AGE, or unreadable."""
+    wheels = _load(PIWHEELS_KEY, name, version, "wheels")
+    if wheels == TOO_LARGE:
+        return TOO_LARGE
+    if isinstance(wheels, list) and all(isinstance(w, str) for w in wheels):
+        return wheels
+    return None
+
+
+def save_piwheels(name: str, version: str, wheels: list[str] | str) -> None:
+    _save(PIWHEELS_KEY, name, version, "wheels", wheels)
+
+
 # --build-info entries: keyed apart from the file lists of the same release, and by the sdist's sha256 as a lock gives
 # it ("" when the index gives the URL), so one lockfile can't answer for another's copy of a release.
 _BUILD_FIELDS: dict[str, type | tuple[type, ...]] = {

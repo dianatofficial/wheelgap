@@ -267,6 +267,35 @@ It's only a hint, so it never changes a status, the summary or the exit code: a 
   down to the subdir, Python, ABI and virtual-package needs of each build of the checked version; `--no-cache` skips
   the cache and `--online` asks again. Failures aren't cached.
 
+### piwheels hint {#piwheels}
+
+`--piwheels` adds a hint to `--explain` (it needs `--explain`): for a package with a gap on a Raspberry Pi target
+(`linux-armv7l` or `linux-aarch64`), it asks [piwheels.org](https://www.piwheels.org/) whether piwheels has a wheel
+of the same version whose tags the target accepts. For example,
+`wheelgap cryptography==50.0.2 -t linux-armv7l --explain --piwheels` adds:
+
+```text
+piwheels has cryptography 50.0.2 for linux-armv7l: --extra-index-url https://www.piwheels.org/simple
+```
+
+A wheel fits when all of these hold:
+- It's of the checked version, in a release that isn't yanked.
+- Its wheel tags are accepted by the target (`target.accepts()`).
+
+Targets that are not Raspberry Pi platforms never match. With `--json --explain`, the package gets a `piwheels` object:
+`"piwheels": {"name": "cryptography", "version": "50.0.2", "wheels": {"linux-armv7l": ["cryptography-50.0.2-cp313-abi3-linux_armv7l.whl"]}}`.
+
+It's only a hint, so it never changes a status, the summary or the exit code.
+
+- **Which names are sent.** Without the flag nothing is looked up. With it, only names that pass
+  [the PyPI-origin rule](how-it-works.md#pypi-origin) are sent to piwheels.org; a note on stderr names the others. A
+  run with `--index-url`, `index-url` or `WHEELGAP_INDEX_URL` looks nothing up, and `--offline` refuses the flag.
+- **Time and size.** Each request is tried once (with a 15-second socket timeout), at most three at a time, all of
+  them together get 30 seconds, and the first that can't reach piwheels.org stops the rest. Answers over 4 MB
+  are refused. When a lookup fails or is dropped, a note on stderr says no hint isn't a "no".
+- **Cache.** Answers, including "no such package", are cached for 24 hours; `--no-cache` skips the cache and
+  `--online` asks again. Failures aren't cached.
+
 ### Newer releases with wheels {#suggest}
 
 `--suggest` adds, after a package's `--explain` blocks (it needs `--explain`), the lowest newer release with a wheel

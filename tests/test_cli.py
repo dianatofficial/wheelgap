@@ -2235,6 +2235,7 @@ def _assert_matches_output_schema(data):
             "bundled",
             "bundled_version_differs",
             "conda_forge",
+            "piwheels",
             "suggest",
             "last_with_wheel",
             "gap_wheel",
@@ -2268,6 +2269,9 @@ def _assert_matches_output_schema(data):
         if "conda_forge" in pkg:  # a hint for some of the targets in rejected, never an empty one
             assert pkg["conda_forge"]["builds"] and set(pkg["conda_forge"]["builds"]) <= set(pkg["rejected"])
             assert all(pkg["conda_forge"]["builds"].values())
+        if "piwheels" in pkg:  # a hint for some of the targets in rejected, never an empty one
+            assert pkg["piwheels"]["wheels"] and set(pkg["piwheels"]["wheels"]) <= set(pkg["rejected"])
+            assert all(pkg["piwheels"]["wheels"].values())
         for note in pkg.get("notes", []):
             assert set(note["targets"]) <= set(pkg.get("rejected", {})), "notes cover gap targets only"
         for label, result in pkg.get("build_lab", {}).items():  # source cells only, for the checked release
