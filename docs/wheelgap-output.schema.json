@@ -247,6 +247,21 @@
                         }
                     }
                 },
+                "piwheels": {
+                    "description": "Present with --explain --piwheels, when piwheels has a wheel of this version that fits at least one of the targets in rejected (for linux-armv7l and linux-aarch64). A hint only: it doesn't change results, summary or the exit code. Left out when nothing fits, the package's index isn't known to be PyPI (its name isn't sent), or the lookup failed (a note on stderr says so).",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "version", "wheels"],
+                    "properties": {
+                        "name": {"type": "string", "description": "The canonical package name that was looked up on piwheels.org."},
+                        "version": {"type": "string", "description": "The checked version, which every wheel counted is of."},
+                        "wheels": {
+                            "type": "object",
+                            "description": "For each target label with a wheel that fits: the matching wheel filenames from piwheels.",
+                            "additionalProperties": {"type": "array", "items": {"type": "string"}}
+                        }
+                    }
+                },
                 "suggest": {
                     "description": "Present with --explain --suggest, from 0.10.0 on, for a pinned package with a gap whose releases were looked up on PyPI: for each target in rejected, a newer release with a wheel for it (not yanked, Requires-Python admitting the target's Python, and no pre-release unless the checked version is one) that also keeps a wheel on every target where this package is wheel now. The targets get the lowest such release with a wheel for all of them when there is one, otherwise each its own nearest; a target with no such release is left out, so the object can be empty. The release can be outside the input's own version specifier (foo<2 resolving to 1.9 may get 2.1). Absent when the package has no gap, has no version, is covered by a requirements file's --no-binary, wasn't looked up (its index isn't known to be PyPI, or the run uses --index-url or WHEELGAP_INDEX_URL), or its lookup failed or was dropped (a note on stderr says so). It doesn't change results, summary or the exit code.",
                     "type": "object",

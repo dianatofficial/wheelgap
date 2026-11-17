@@ -19,7 +19,7 @@ from packaging.markers import InvalidMarker, Marker
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 
-from . import __version__, cache, condaforge, gapwheels, origin
+from . import __version__, cache, condaforge, gapwheels, origin, piwheels
 from . import notes as tracker
 from . import suggest as release_suggest
 from .api import explain_issues_urls, running_python
@@ -265,6 +265,12 @@ def make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with --explain, also say when conda-forge has a package of the same name with builds for a gap's "
         "platform (sends the names of PyPI packages with gaps to anaconda.org)",
+    )
+    p.add_argument(
+        "--piwheels",
+        action="store_true",
+        help="with --explain, also say when piwheels has a wheel of the same version for a Raspberry Pi gap "
+        "(sends the names of PyPI packages with gaps to piwheels.org)",
     )
     p.add_argument(
         "--deps",
@@ -775,11 +781,12 @@ def render_explain(
     builds: RowBuilds | None = None,
     issues_urls: dict[int, str | None] | None = None,
     published_wheels: list[gapwheels.Fill] | None = None,
+    pi_wheels: dict[int, piwheels.Hint] | None = None,
 ) -> list[str]:
-    """`conda_forge`: --conda-forge hints, `build_info`: --build-info answers and `suggestions`: --suggest's, by id()
-    of the row's package. `notes` and `builds` (the tracker's build lab results): --notes, by id() of the row.
-    `published_wheels`: --fix's fills (from the gap wheel list, which may come from the 24-hour cache), shown once per
-    release under its first filled target."""
+    """`conda_forge`: --conda-forge hints, `piwheels`: --piwheels hints, `build_info`: --build-info answers and
+    `suggestions`: --suggest's, by id() of the row's package. `notes` and `builds` (the tracker's build lab results):
+    --notes, by id() of the row. `published_wheels`: --fix's fills (from the gap wheel list, which may come from the
+    24-hour cache), shown once per release under its first filled target."""
     multi_py = len({t.python for t in targets}) > 1
     filled: dict[int, list[gapwheels.Fill]] = {}
     for fill in published_wheels or []:
@@ -825,6 +832,8 @@ def render_explain(
             out.append("")
         if conda_forge and (h := conda_forge.get(id(r.package))):
             out += [condaforge.hint_text(r.package, h, multi_py), ""]
+        if pi_wheels and (h := pi_wheels.get(id(r.package))):
+            out += [piwheels.hint_text(r.package, h, multi_py), ""]
         for note, ts in (notes or {}).get(id(r), []):
             # Printed as is: a note is one line of plain text (tracker.parse). It can't hold a GitHub Actions workflow
             # command either: tracker.parse drops a note with "##[" or a word starting with "::", and the text never
@@ -938,6 +947,7 @@ def report_json(
     dropped: dict[str, str] | None = None,
     issues_urls: dict[int, str | None] | None = None,
     gap_wheels: list[gapwheels.Fill] | None = None,
+    pi_wheels: dict[int, piwheels.Hint] | None = None,
 ) -> str:
     multi_py = len({t.python for t in targets}) > 1
     gaps = [r for r in rows if not r.ok]
@@ -988,6 +998,12 @@ def report_json(
                     "name": h.name,
                     "version": h.version,
                     "builds": {t.label(multi_py): subdirs for t, subdirs in h.builds.items()},
+                }
+            if pi_wheels and (h := pi_wheels.get(id(r.package))):
+                out["piwheels"] = {
+                    "name": h.name,
+                    "version": h.version,
+                    "wheels": {t.label(multi_py): ws for t, ws in h.wheels.items()},
                 }
             # The tracker's notes for this package's gaps, each with the gap targets it covers.
             out["notes"] = [
@@ -1227,6 +1243,7 @@ def render_markdown(
     suggestions: Suggestions | None = None,
     dropped: dict[str, str] | None = None,
     issues_urls: dict[int, str | None] | None = None,
+    pi_wheels: dict[int, piwheels.Hint] | None = None,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
     plain = Style(False)
@@ -1304,6 +1321,7 @@ def render_markdown(
             build_info,
             builds=builds,
             issues_urls=issues_urls,  # inside the fence below, so shown exactly, with no escaping
+            pi_wheels=pi_wheels,
         )
         fence = "`" * max([3, *(len(run) + 1 for line in lines for run in re.findall(r"`+", line))])
         out += ["<details><summary>Why (rejected wheels)</summary>", "", fence, *lines, fence, "", "</details>", ""]
@@ -1467,6 +1485,52 @@ def conda_forge_hints(
     hints = {}
     for r in asked:
         if h := condaforge.hint(r.package, gap_targets(r, targets), lookups.found):
+            hints[id(r.package)] = h
+    return hints
+
+
+def piwheels_hints(
+    gaps: list[Row], targets: list[Target], sources: list[Source], index_url: str | None, quiet: bool, cached: dict
+) -> dict[int, piwheels.Hint]:
+    """--piwheels: look the gap packages up on piwheels.org and return their hints, by id() of the package. Only
+    names that are positively PyPI's are sent, and none that another input of the run places elsewhere
+    (origin.private_names); notes on stderr say which packages weren't looked up, and why."""
+    other = origin.other_index(index_url)
+    elsewhere = origin.private_names(sources, simple_index=index_url)
+    if other is not None and not quiet:
+        print(
+            "wheelgap: note: --piwheels looks nothing up when packages come from another index "
+            f"({other}), so no package names leave it",
+            file=sys.stderr,
+        )
+    source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
+    asked: list[Row] = []
+    kept_in: dict[str, str] = {}  # by canonical name, so two spellings of one package count once
+    for r in gaps:
+        if r.package.version and piwheels.wanted(gap_targets(r, targets)):
+            if origin.known_pypi(r.package, source_of[id(r.package)], simple_index=index_url, private=elsewhere):
+                asked.append(r)
+            else:
+                kept_in.setdefault(r.package.key, r.package.name)
+    if kept_in and other is None and not quiet:
+        private = list(kept_in.values())
+        print(
+            f"wheelgap: note: --piwheels didn't look up {len(private)} package{'s' * (len(private) != 1)} "
+            f"whose index isn't known to be PyPI ({_names(private)}), so their names stay private",
+            file=sys.stderr,
+        )
+    lookups = piwheels.look_up_all([(r.package.key, r.package.version or "") for r in asked], **cached)
+    if lookups.unchecked and not quiet:
+        n = len(lookups.unchecked)
+        which = _names([f"{name} ({why})" for name, why in lookups.unchecked.items()])
+        print(
+            f"wheelgap: note: --piwheels couldn't check {n} package{'s' * (n != 1)}: {which}; "
+            "no hint doesn't mean piwheels has no wheel",
+            file=sys.stderr,
+        )
+    hints = {}
+    for r in asked:
+        if h := piwheels.hint(r.package, gap_targets(r, targets), lookups.found):
             hints[id(r.package)] = h
     return hints
 
@@ -1684,6 +1748,8 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         return 0
     if args.conda_forge and not args.explain:
         parser.error("--conda-forge only adds to --explain; pass --explain too")
+    if args.piwheels and not args.explain:
+        parser.error("--piwheels only adds to --explain; pass --explain too")
     build_args: dict[str, str] = {}
     for item in args.build_arg or []:
         name, eq, value = item.partition("=")
@@ -1954,6 +2020,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     f"{offline_how}: --conda-forge would look packages up on anaconda.org; "
                     f"drop --conda-forge, or {undo_offline(offline_how)}"
                 )
+            if args.piwheels:
+                raise SourceError(
+                    f"{offline_how}: --piwheels would look packages up on piwheels.org; "
+                    f"drop --piwheels, or {undo_offline(offline_how)}"
+                )
             if args.suggest:
                 raise SourceError(
                     f"{offline_how}: --suggest would look packages up on PyPI; "
@@ -2178,6 +2249,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 file=sys.stderr,
             )
     conda_forge = conda_forge_hints(gaps, targets, sources, index_url, quiet, cached) if args.conda_forge else {}
+    pi_wheels = piwheels_hints(gaps, targets, sources, index_url, quiet, cached) if args.piwheels else {}
     # None: not asked for. Like the hints above, it never changes a status or the exit code.
     suggestions = version_suggestions(gaps, targets, sources, index_url, quiet) if args.suggest else None
     # With --fail-on missing, source builds are accepted; missing and unknown packages still fail. Gaps on
@@ -2331,6 +2403,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 dropped,
                 issues_urls=issues_urls,
                 gap_wheels=fills,
+                pi_wheels=pi_wheels,
             )
         )
         return code
@@ -2357,6 +2430,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         suggestions=suggestions,
                         dropped=dropped,
                         issues_urls=issues_urls,
+                        pi_wheels=pi_wheels,
                     ),
                     *gapwheels.markdown_lines(fills or [], multi_py),
                 ]
@@ -2422,6 +2496,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 row_builds,
                 issues_urls=issues_urls,
                 published_wheels=fills,
+                pi_wheels=pi_wheels,
             ):
                 print(ln)
 
