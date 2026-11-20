@@ -876,11 +876,10 @@ def _selected_direct_dependencies(
                 if canonicalize_name(name) in extras:
                     follow(optional, owner, extras)
         follow(source.uv_manifest.get("requirements", []), None, selection.extras)
-    for i in roots:
-        owner = None if i in direct_roots else (source.packages[i].key, source.packages[i].name)
+    for i in roots:  # a member's group, like the project's, starts at the group: --explain shows `(NAME group) → …`
         for name, items in packages[i].get("dev-dependencies", {}).items():
             if canonicalize_name(name) in groups:
-                follow(items, owner, frozenset())
+                follow(items, None, frozenset())
     for name, items in source.uv_manifest.get("dependency-groups", {}).items():
         if canonicalize_name(name) in groups:
             follow(items, None, frozenset())
