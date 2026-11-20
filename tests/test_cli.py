@@ -4371,6 +4371,36 @@ def test_whole_lock_hints_gap_reached_through_non_default_group(capsys, tmp_path
     assert fake_pypi == []
 
 
+def test_whole_lock_hints_in_virtual_workspace_name_the_direct_dependency(capsys, tmp_path, fake_pypi):
+    # With no project at the root, every member is where uv sync starts, so hints name the dependency, not the member.
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        "[manifest]\n"
+        'members = ["api"]\n'
+        "[[package]]\n"
+        'name = "api"\n'
+        'version = "1"\n'
+        'source = { editable = "packages/api" }\n'
+        'dependencies = [{ name = "tool" }]\n'
+        "[[package]]\n"
+        'name = "tool"\n'
+        'version = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "cryptography" }]\n'
+        'wheels = [{ url = "https://files.example/tool-1-py3-none-any.whl" }]\n'
+        "[[package]]\n"
+        'name = "cryptography"\n'
+        'version = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via tool)" in out and "via api" not in out
+    assert fake_pypi == []
+
+
 def test_poetry_extra_edge_credits_nobody(capsys, tmp_path, fake_pypi):
     # Poetry's graph doesn't record which parent asked for an extra, so a package behind one gets no (via ...) hint.
     (tmp_path / "poetry.lock").write_text(

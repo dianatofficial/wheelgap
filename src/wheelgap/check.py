@@ -833,12 +833,8 @@ def _selected_direct_dependencies(
     owners: dict[int, dict[str, str]] = {}
     active: dict[tuple[int, str], frozenset[str]] = {}
     queue: deque[tuple[int, str]] = deque()
-    project_roots = {
-        i
-        for i in source.roots
-        if any(packages[i].get("source", {}).get(kind) == "." for kind in ("editable", "virtual"))
-    }
-    direct_roots = project_roots if everything else set(roots)
+    # The project (or, in a virtual workspace, every member) is where hints start; other members are named.
+    direct_roots = set(uv_selected_roots(source))
 
     def visit(i: int, owner: tuple[str, str], requested: frozenset[str]) -> None:
         key, label = owner
