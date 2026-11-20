@@ -4922,6 +4922,113 @@ def test_project_exclude_newer_applies_to_selected_extra(fake_pypi, capsys, tmp_
     assert [(p["name"], p["version"]) for p in json.loads(out)["packages"]] == [("dated", "1.0")]
 
 
+LOCKED_PYTHON_FILES = {
+    "poetry.lock": ("[[package]]", "python-versions", 'files = [{file = "purewheel-3.1-py3-none-any.whl"}]'),
+    # inherit_metadata: the lock records each package's marker, which the range needs (see the test below)
+    "pdm.lock": (
+        "[[package]]",
+        "requires_python",
+        'files = [{file = "purewheel-3.1-py3-none-any.whl"}]\n\n[metadata]\nstrategy = ["inherit_metadata"]',
+    ),
+    "pylock.toml": ("[[packages]]", "requires-python", 'wheels = [{name = "purewheel-3.1-py3-none-any.whl"}]'),
+}
+
+
+@pytest.mark.parametrize("lockfile", LOCKED_PYTHON_FILES)
+def test_offline_locked_package_python_range(capsys, tmp_path, fake_pypi, lockfile, monkeypatch):
+    from conftest import FAKE_INDEX
+
+    from wheelgap import check_lockfile, make_targets
+
+    table, key, files = LOCKED_PYTHON_FILES[lockfile]
+    path = tmp_path / lockfile
+    path.write_text(f'{table}\nname = "purewheel"\nversion = "3.1"\n{key} = "<3.13"\n{files}\n', encoding="utf-8")
+    args = (str(path), "--offline", "--explain", "-t", "linux-x86_64", "-p", "3.12,3.13")
+    code, out, _ = run(capsys, *args, "--json")
+    assert code == 1
+    packages = json.loads(out)["packages"]
+    assert [r["results"] for r in packages] == [
+        {"3.12 linux-x86_64": "wheel", "3.13 linux-x86_64": "n/a"},
+        {"3.12 linux-x86_64": "n/a", "3.13 linux-x86_64": "missing"},
+    ]
+    assert packages[1]["rejected"]["3.13 linux-x86_64"] == [
+        {"file": "purewheel-3.1-py3-none-any.whl", "reason": "requires Python <3.13"}
+    ]
+    assert "requires Python <3.13" in run(capsys, *args)[1]
+    targets = make_targets(["3.12", "3.13"], "linux-x86_64")
+    results = check_lockfile(path, targets, offline=True)
+    assert results[0].statuses[targets[0]] is Status.WHEEL
+    assert results[1].statuses[targets[1]] is Status.MISSING
+    assert fake_pypi == []
+    assert run(capsys, str(path), "--online", "--no-cache", "-t", "linux-x86_64", "-p", "3.13")[0] == 0
+    monkeypatch.setitem(
+        FAKE_INDEX,
+        "purewheel",
+        {"3.1": [{"filename": "purewheel-3.1-py3-none-any.whl", "requires_python": "<3.13"}]},
+    )
+    assert run(capsys, str(path), "--online", "--no-cache", "-t", "linux-x86_64", "-p", "3.13")[0] == 1
+
+
+@pytest.mark.parametrize("order", ["3.13,3.12", "3.12,3.13"])
+def test_offline_locked_python_range_without_a_version(capsys, tmp_path, fake_pypi, order):
+    """pylock.toml lets a package leave `version` out. Each Python still gets its own answer, whatever the -p order."""
+    path = tmp_path / "pylock.toml"
+    path.write_text(
+        '[[packages]]\nname = "purewheel"\nrequires-python = "<3.13"\n'
+        'wheels = [{name = "purewheel-3.1-py3-none-any.whl"}]\n',
+        encoding="utf-8",
+    )
+    code, out, _ = run(capsys, str(path), "--offline", "-t", "linux-x86_64", "-p", order, "--json")
+    assert code == 1
+    statuses = {
+        target: status
+        for package in json.loads(out)["packages"]
+        for target, status in package["results"].items()
+        if status != "n/a"
+    }
+    assert statuses == {"3.12 linux-x86_64": "wheel", "3.13 linux-x86_64": "missing"}
+    assert fake_pypi == []
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "key", "metadata"),
+    [
+        # Before lock-version 2.1, a direct dependency's Python marker is only in pyproject.toml.
+        ("poetry.lock", "python-versions", '[metadata]\nlock-version = "2.0"\n'),
+        # Without inherit_metadata, a pdm.lock has no markers on its packages.
+        ("pdm.lock", "requires_python", ""),
+        ("pdm.lock", "requires_python", '[metadata]\nstrategy = ["cross_platform"]\n'),
+    ],
+)
+def test_locked_python_range_needs_markers_on_packages(capsys, tmp_path, fake_pypi, lockfile, key, metadata):
+    """Poetry and PDM install a package only on the Pythons its markers select. A lock that doesn't record them per
+    package can't say whether the range leaves out a Python the package is installed on, so it's read as before."""
+    path = tmp_path / lockfile
+    path.write_text(
+        f'[[package]]\nname = "purewheel"\nversion = "3.1"\n{key} = "<3.13"\n'
+        'files = [{file = "purewheel-3.1-py3-none-any.whl"}]\n\n' + metadata,
+        encoding="utf-8",
+    )
+    code, out, _ = run(capsys, str(path), "--offline", "-t", "linux-x86_64", "-p", "3.12,3.13", "--json")
+    assert code == 0
+    assert [p["results"] for p in json.loads(out)["packages"]] == [
+        {"3.12 linux-x86_64": "wheel", "3.13 linux-x86_64": "wheel"}
+    ]
+    assert fake_pypi == []
+
+
+@pytest.mark.parametrize("restriction", ["", 'python-versions = "*"', 'python-versions = "^3.12"'])
+def test_offline_locked_package_python_range_unrestricted(capsys, tmp_path, fake_pypi, restriction):
+    path = tmp_path / "poetry.lock"
+    path.write_text(
+        '[[package]]\nname = "purewheel"\nversion = "3.1"\n'
+        'files = [{file = "purewheel-3.1-py3-none-any.whl"}]\n' + restriction,
+        encoding="utf-8",
+    )
+    assert run(capsys, str(path), "--offline", "-t", "linux-x86_64", "-p", "3.13")[0] == 0
+    assert fake_pypi == []
+
+
 @pytest.mark.parametrize("lockname", ["uv.lock", "app.py.lock"])
 def test_uv_lock_online_ignores_python_upper_bound(capsys, tmp_path, fake_pypi, monkeypatch, lockname):
     from conftest import FAKE_INDEX

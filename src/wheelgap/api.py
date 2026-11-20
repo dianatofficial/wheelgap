@@ -29,7 +29,7 @@ from .check import Row, Status, check, explain, explain_lines, status_for, wheel
 from .deps import Resolver, pinned_complete, resolve_deps
 from .offline import require_offline
 from .pyodide import PyodideLock, bundled_version_differs, bundles, check_locks
-from .pypi import fill_all, recheck_lock
+from .pypi import apply_locked_python_ranges, fill_all, recheck_lock
 from .sources import (
     LOCKFILES,
     Package,
@@ -604,6 +604,7 @@ def _check_lockfile(
     lock = source.pyproject_extras is None and not (deps and not pinned_complete(source))
     if lock and not online and not offline and pythons_outside_lock(source, targets):
         recheck_lock(source.packages)
+    apply_locked_python_ranges(source.packages, pythons, online=online)
     if online and source.uv_packages is not None:
         restore_uv_python_files(source.packages, pythons)
     rows: list[Row] = [r for r in check([source], targets) if r.needed]

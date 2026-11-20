@@ -86,6 +86,14 @@ class Package:
     resolutions: dict[str, Package] = field(default_factory=dict)
     # Files of a pinned release whose Requires-Python excludes the target Python, mapped to their --explain reason.
     requires_python_rejected: dict[str, str] = field(default_factory=dict)
+    # The release's Requires-Python as the lock records it for the package (pylock.toml's requires-python,
+    # poetry.lock's python-versions, pdm.lock's requires_python), applied to the lock's own files per target Python
+    # (pypi.apply_locked_python_ranges). Only kept where the lock also records each package's markers (always in a
+    # pylock.toml; Poetry from lock-version 2.1; PDM with inherit_metadata). Poetry and PDM lock a package only for
+    # the Pythons its markers select, so there a range that leaves a target out says something only for a Python
+    # outside the project's own range. Without the markers the package would be reported `missing` on a Python the
+    # installer never installs it for (numpy = [{version = "1.26.4", python = "<3.13"}, ...] in pyproject.toml).
+    locked_requires_python: str | None = None
     # Yanked status of Python-rejected files, needed when applying uv's upper-bound policy.
     python_rejected_yanked: frozenset[str] = frozenset()
     # Files admitted by uv that pip would refuse for this Python.
@@ -961,6 +969,9 @@ def parse_pylock(path: Path) -> Source:
                 files.append(_filename(p["sdist"], path.name, pkg.name) or f"{p['name']}-{p.get('version')}.tar.gz")
                 pkg.sdist_url, pkg.sdist_sha256 = _sdist_source(p["sdist"], "hashes")
             pkg.files = files
+        requires = p.get("requires-python")
+        if pkg.files is not None and isinstance(requires, str):
+            pkg.locked_requires_python = requires
         pkgs.append(pkg)
     requires = data.get("requires-python")
     return Source(path.name, pkgs, requires_python=requires if isinstance(requires, str) else None)
@@ -982,6 +993,8 @@ def parse_poetry_lock(path: Path) -> Source:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     metadata = data.get("metadata", {})
     legacy_files = metadata.get("files", {})
+    # Lock files before 2.1 (all of Poetry 1.x) only record markers on dependency edges, not on packages.
+    edge_markers_only = _version_tuple(str(metadata.get("lock-version", "2.1"))) < (2, 1)
     pkgs: list[Package] = []
     edges: dict[int, list[Edge]] = {}
     for p in data.get("package", []):
@@ -1015,10 +1028,14 @@ def parse_poetry_lock(path: Path) -> Source:
                 None if entries is None else [f for f in (_filename(e, path.name, pkg.name) for e in entries) if f]
             )
         edges[len(pkgs)] = _poetry_edges(p)
+        requires = p.get("python-versions")
+        # Not before 2.1: a direct dependency's Python marker is only in pyproject.toml there, so the range could
+        # report a package for a Python that Poetry never installs it on (see Package.locked_requires_python).
+        if not edge_markers_only and pkg.files is not None and isinstance(requires, str):
+            pkg.locked_requires_python = requires
         pkgs.append(pkg)
-    # Lock files before 2.1 (all of Poetry 1.x) only record markers on dependency edges, not on
-    # packages, so walk the graph from the packages nothing depends on, as for uv.lock.
-    if _version_tuple(str(metadata.get("lock-version", "2.1"))) < (2, 1) and pkgs:
+    # With markers on edges only, walk the graph from the packages nothing depends on, as for uv.lock.
+    if edge_markers_only and pkgs:
         roots = set(_graph_roots(pkgs, edges))
         # The project's own dependencies are roots too, even if another package also depends on them
         # under a marker (colorama directly, and via click only on Windows).
@@ -1153,6 +1170,8 @@ def _add_once(pkgs: list[Package], seen: dict[tuple[str, str | None], Package], 
             first.registry = pkg.registry  # the other entry is from PyPI: this index decides for both
         else:
             first.skip = "private index"  # pinned to two indexes: no single lookup is safe for both
+    if first.locked_requires_python != pkg.locked_requires_python:
+        first.locked_requires_python = None  # conflicting entries can't establish a release-wide restriction
     if first.markers is not None:
         first.markers = None if pkg.markers is None else first.markers + pkg.markers
 
@@ -1163,6 +1182,7 @@ def parse_pdm_lock(path: Path) -> Source:
     legacy_files = metadata.get("files", {})
     locked_groups = metadata.get("groups")
     strategy = metadata.get("strategy")
+    inherit_metadata = isinstance(strategy, list) and "inherit_metadata" in strategy
     pkgs: list[Package] = []
     seen: dict[tuple[str, str | None], Package] = {}
     # Each package's groups, merged over its entries (PDM writes one per extras variant).
@@ -1197,6 +1217,10 @@ def parse_pdm_lock(path: Path) -> Source:
             if entries is not None:
                 pkg.files = [f for f in (_filename(e, path.name, pkg.name) for e in entries) if f]
             # Not in either place: leave files as None so the PyPI lookup fills them in.
+        requires = p.get("requires_python")
+        # Only with inherit_metadata, which records each package's marker (see Package.locked_requires_python).
+        if inherit_metadata and pkg.files is not None and isinstance(requires, str):
+            pkg.locked_requires_python = requires
         _add_once(pkgs, seen, pkg)
     return Source(
         path.name,
@@ -1207,7 +1231,7 @@ def parse_pdm_lock(path: Path) -> Source:
             if isinstance(locked_groups, list)
             else None
         ),
-        pdm_inherit_metadata=isinstance(strategy, list) and "inherit_metadata" in strategy,
+        pdm_inherit_metadata=inherit_metadata,
         pdm_pyproject=path.parent / "pyproject.toml",
     )
 

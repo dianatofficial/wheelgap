@@ -55,7 +55,15 @@ from .pyodide import (
     check_targets,
     load_pyodide_lock,
 )
-from .pypi import check_index_url, fill_all, keeps_locked_files, previous_release, recheck_lock, split_credentials
+from .pypi import (
+    apply_locked_python_ranges,
+    check_index_url,
+    fill_all,
+    keeps_locked_files,
+    previous_release,
+    recheck_lock,
+    split_credentials,
+)
 from .sarif import write_sarif
 from .sources import (
     Package,
@@ -2339,6 +2347,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 note += f"; {' and '.join(unchecked)} may show false gaps for those Pythons"
             if unchecked or not quiet:  # quiet runs stay quiet unless the answer may be wrong
                 print(note, file=sys.stderr)
+    apply_locked_python_ranges(packages, pythons, online=args.online)
     if args.online:
         for source, needed in zip(sources, needed_by_source, strict=True):
             if source.uv_packages is not None:
