@@ -823,7 +823,7 @@ def _selected_direct_dependencies(
         defaults = available if "*" in source.uv_default_groups else frozenset(source.uv_default_groups)
         selected = selection.groups | defaults
     if everything:
-        selected = available
+        selected = frozenset(available)
     groups = frozenset(selected - {"dev"} if selection.no_dev else selected)
     by_name: dict[str, list[int]] = {}
     for i, pkg in enumerate(source.packages):
