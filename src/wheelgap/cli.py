@@ -1857,10 +1857,15 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         parser.error("--notes only adds to --explain; pass --explain too")
     if args.dist and args.inputs:
         parser.error("--dist DIR takes no other inputs")
-    if args.dockerfile_context and not args.dockerfile_inputs:
-        parser.error("--dockerfile-context is only used with --dockerfile-inputs; pass --dockerfile-inputs too")
-    if args.dockerfile_context and not Path(args.dockerfile_context).is_dir():
-        parser.error(f"--dockerfile-context: not a directory: {args.dockerfile_context}")
+    if args.dockerfile_context is not None:
+        if not args.dockerfile_inputs:
+            parser.error("--dockerfile-context is only used with --dockerfile-inputs; pass --dockerfile-inputs too")
+        # An empty DIR (an unset variable in a script) must not quietly fall back to the Dockerfile's folder, where
+        # a different requirements.txt may sit, and Path("") would be the current folder.
+        if not args.dockerfile_context:
+            parser.error("--dockerfile-context: DIR is empty; pass the build context's folder (. for this one)")
+        if not Path(args.dockerfile_context).is_dir():
+            parser.error(f"--dockerfile-context: not a directory: {args.dockerfile_context}")
     if args.dockerfile_inputs:
         if not args.dockerfile:
             parser.error("--dockerfile-inputs reads what --dockerfile installs; pass --dockerfile too")
