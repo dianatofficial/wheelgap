@@ -55,7 +55,15 @@ from .pyodide import (
     check_targets,
     load_pyodide_lock,
 )
-from .pypi import check_index_url, fill_all, keeps_locked_files, previous_release, recheck_lock, split_credentials
+from .pypi import (
+    apply_locked_python_ranges,
+    check_index_url,
+    fill_all,
+    keeps_locked_files,
+    previous_release,
+    recheck_lock,
+    split_credentials,
+)
 from .sarif import write_sarif
 from .sources import (
     Package,
@@ -66,6 +74,7 @@ from .sources import (
     load_inputs,
     parse_dist,
     pythons_outside_lock,
+    restore_uv_python_files,
     select_pyproject_extras,
     select_pyproject_groups,
     select_uv_dependencies,
@@ -999,6 +1008,8 @@ def report_json(
         if pyodide_lock and Status.BUNDLED in r.results.values():
             out["bundled"] = pyodide_lock.packages[r.package.key]
             out["bundled_version_differs"] = bundled_version_differs(r.package, pyodide_lock)
+        if r.package.pip_refuses:
+            out["pip_refuses"] = r.package.pip_refuses
         if explained:
             out["rejected"] = {
                 t.label(multi_py): [
@@ -2273,10 +2284,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 )
     # --online asks the index again but saves the answer, so a plain run afterwards doesn't go back to an older one.
     cached = {"read_cache": not (args.no_cache or args.online), "write_cache": not args.no_cache}
+    pythons = tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets))
     other_index = fill_all(
         packages,
         refresh=args.online,
-        pythons=tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets)),
+        pythons=pythons,
         simple_index=index_url,
         read_cache=cached["read_cache"],
         write_cache=cached["write_cache"],
@@ -2315,6 +2327,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 note += f"; {' and '.join(unchecked)} may show false gaps for those Pythons"
             if unchecked or not quiet:  # quiet runs stay quiet unless the answer may be wrong
                 print(note, file=sys.stderr)
+    apply_locked_python_ranges(packages, pythons, online=args.online)
+    if args.online:
+        for source, needed in zip(sources, needed_by_source, strict=True):
+            if source.uv_packages is not None:
+                restore_uv_python_files(needed, pythons)
     skipped = [p for p in packages if p.skip]
     rows = [r for r in check(sources, targets) if r.needed]
     if pyodide_lock:
@@ -2357,6 +2374,16 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     for r in rows:
         if r.package.key in ignore_on:
             r.ignored = frozenset(t for t in targets if t.platform in ignore_on[r.package.key])
+    # A uv.lock checked with --online (sources.restore_uv_python_files): the answer is uv's, and pip's differs.
+    pip_refusals = len({(r.package.key, r.package.version) for r in rows if r.package.pip_refuses})
+    if pip_refusals and not quiet:
+        what, it = ("package is", "it") if pip_refusals == 1 else ("packages are", "them")
+        print(
+            f"wheelgap: note: {pip_refusals} {what} checked as uv installs {it}, though pip would refuse {it}: "
+            "uv ignores Requires-Python upper bounds (the text report's --explain says which, and --json lists "
+            "the files in pip_refuses)",
+            file=sys.stderr,
+        )
     gaps = [r for r in rows if not r.ok]
     if args.from_log is not None:
         multi_py = len({t.python for t in targets}) > 1
@@ -2701,6 +2728,20 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if not rows:  # "All 0 packages have a wheel" reads like a success when the run checked nothing
         print(style.dim("No packages to check."))
         return 0
+    if args.explain and pip_refusals:
+        for r in rows:
+            if r.package.pip_refuses:
+                affected = ", ".join(
+                    target.label(multi_py) for target in targets if r.results[target] is not Status.NOT_NEEDED
+                )
+                # One line per reason, not per file: a release's files nearly always share one Requires-Python.
+                for why in dict.fromkeys(r.package.pip_refuses.values()):
+                    print(
+                        f"{r.package.name} {r.package.version} on {affected}: checked as uv installs it "
+                        f"(uv ignores Requires-Python upper bounds); pip refuses it: {why}"
+                    )
+        print()
+
     if not gaps:
         what = "The 1 package has" if total_pkgs == 1 else f"All {total_pkgs} packages have"
         every = f"{'every one of ' if n_t > 1 else ''}{n_t} target{'s' * (n_t > 1)}{apart_from_ignored(rows)}"
