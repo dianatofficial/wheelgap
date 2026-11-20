@@ -4331,6 +4331,169 @@ def test_default_uv_extra_is_attributed_only_to_the_direct_requester(capsys, tmp
     assert fake_pypi == []
 
 
+def test_whole_lock_hints_gap_reached_through_second_member_extra(capsys, tmp_path, fake_pypi):
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        "[manifest]\n"
+        'members = ["second"]\n'
+        "[[package]]\n"
+        'name = "app"\n'
+        'version = "1"\n'
+        'source = { editable = "." }\n'
+        "[[package]]\n"
+        'name = "second"\n'
+        'version = "1"\n'
+        'source = { editable = "packages/second" }\n'
+        "[package.optional-dependencies]\n"
+        'extra = [{ name = "cryptography" }]\n'
+        "[[package]]\n"
+        'name = "cryptography"\n'
+        'version = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via second)" in out
+    assert fake_pypi == []
+    code, out, _ = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline", "--explain")
+    assert code == 1 and "via: second → cryptography" in out
+    code, out, _ = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--no-dev", "--offline")
+    assert code == 0 and "cryptography" not in out
+
+
+def test_whole_lock_hints_gap_reached_through_non_default_group(capsys, tmp_path, fake_pypi):
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        "[[package]]\n"
+        'name = "app"\n'
+        'version = "1"\n'
+        'source = { editable = "." }\n'
+        "[package.dev-dependencies]\n"
+        'lint = [{ name = "tool" }]\n'
+        "[[package]]\n"
+        'name = "tool"\n'
+        'version = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "cryptography" }]\n'
+        'wheels = [{ url = "https://files.example/tool-1-py3-none-any.whl" }]\n'
+        "[[package]]\n"
+        'name = "cryptography"\n'
+        'version = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via tool)" in out
+    assert fake_pypi == []
+
+
+def test_whole_lock_hints_gap_in_second_member_group_name_the_group_dependency(capsys, tmp_path, fake_pypi):
+    # --explain starts a group's path at the group, not the member, so the hint names the group's dependency.
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        "[manifest]\n"
+        'members = ["second"]\n'
+        "[[package]]\n"
+        'name = "app"\n'
+        'version = "1"\n'
+        'source = { editable = "." }\n'
+        "[[package]]\n"
+        'name = "second"\n'
+        'version = "1"\n'
+        'source = { editable = "packages/second" }\n'
+        "[package.dev-dependencies]\n"
+        'lint = [{ name = "tool" }]\n'
+        "[[package]]\n"
+        'name = "tool"\n'
+        'version = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "cryptography" }]\n'
+        'wheels = [{ url = "https://files.example/tool-1-py3-none-any.whl" }]\n'
+        "[[package]]\n"
+        'name = "cryptography"\n'
+        'version = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via tool)" in out and "via second" not in out
+    code, out, _ = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline", "--explain")
+    assert code == 1 and "via: (lint group) → tool → cryptography" in out
+    assert fake_pypi == []
+
+
+def test_whole_lock_explain_path_goes_through_the_edge_that_asks_for_the_extra(capsys, tmp_path, fake_pypi):
+    # app needs alpha and beta; only beta asks for alpha[x], which pulls in cryptography. The path must go through beta.
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        "[[package]]\n"
+        'name = "app"\n'
+        'version = "1"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [{ name = "alpha" }, { name = "beta" }]\n'
+        "[[package]]\n"
+        'name = "alpha"\n'
+        'version = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'wheels = [{ url = "https://files.example/alpha-1-py3-none-any.whl" }]\n'
+        "[package.optional-dependencies]\n"
+        'x = [{ name = "cryptography" }]\n'
+        "[[package]]\n"
+        'name = "beta"\n'
+        'version = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "alpha", extra = ["x"] }]\n'
+        'wheels = [{ url = "https://files.example/beta-1-py3-none-any.whl" }]\n'
+        "[[package]]\n"
+        'name = "cryptography"\n'
+        'version = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline", "--explain")
+    assert code == 1 and not err
+    assert "cryptography (via beta)" in out
+    assert "via: app → beta → alpha → cryptography" in out
+    assert fake_pypi == []
+
+
+def test_whole_lock_hints_in_virtual_workspace_name_the_direct_dependency(capsys, tmp_path, fake_pypi):
+    # With no project at the root, every member is where uv sync starts, so hints name the dependency, not the member.
+    (tmp_path / "uv.lock").write_text(
+        "version = 1\n"
+        "[manifest]\n"
+        'members = ["api"]\n'
+        "[[package]]\n"
+        'name = "api"\n'
+        'version = "1"\n'
+        'source = { editable = "packages/api" }\n'
+        'dependencies = [{ name = "tool" }]\n'
+        "[[package]]\n"
+        'name = "tool"\n'
+        'version = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'dependencies = [{ name = "cryptography" }]\n'
+        'wheels = [{ url = "https://files.example/tool-1-py3-none-any.whl" }]\n'
+        "[[package]]\n"
+        'name = "cryptography"\n'
+        'version = "50.0.2"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        'sdist = { url = "https://files.example/cryptography-50.0.2.tar.gz" }\n',
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--offline")
+    assert code == 1 and not err
+    assert "cryptography (via tool)" in out and "via api" not in out
+    assert fake_pypi == []
+
+
 def test_poetry_extra_edge_credits_nobody(capsys, tmp_path, fake_pypi):
     # Poetry's graph doesn't record which parent asked for an extra, so a package behind one gets no (via ...) hint.
     (tmp_path / "poetry.lock").write_text(
