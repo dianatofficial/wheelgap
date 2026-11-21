@@ -102,7 +102,9 @@ def parse(data: object) -> list[GapWheel] | None:
 
 
 def look_up_cached() -> tuple[list[GapWheel] | None, float | None]:
-    """The cached gap wheel list and the timestamp it was saved, or (None, None) if not cached or expired."""
+    """The cached gap wheel list and the time it was saved (seconds since the epoch), or (None, None): not cached,
+    older than cache.GAP_WHEELS_MAX_AGE, unreadable, or without a usable entry. The caller (cli.gap_wheel_fills) uses
+    it only when it fills a gap, and otherwise calls fetch()."""
     cached, saved = cache.load_gap_wheels_with_time(pypi.GAP_WHEELS_URL)
     if cached is not None and saved is not None:
         wheels = parse(cached)
@@ -122,16 +124,6 @@ def fetch(*, write_cache: bool = True) -> list[GapWheel] | None:
     if wheels and write_cache:
         cache.save_gap_wheels(pypi.GAP_WHEELS_URL, data)
     return wheels
-
-
-def look_up(*, read_cache: bool = True, write_cache: bool = True) -> list[GapWheel] | None:
-    """The gap wheel list, or None if it couldn't be fetched or read. A list parse() accepts with at least one usable
-    entry is kept in the 1-hour cache (--no-cache: neither read nor saved; --online: fetched again, then saved)."""
-    if read_cache:
-        cached_wheels, _ = look_up_cached()
-        if cached_wheels:
-            return cached_wheels
-    return fetch(write_cache=write_cache)
 
 
 @dataclass(frozen=True)

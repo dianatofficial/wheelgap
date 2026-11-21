@@ -706,8 +706,23 @@ def test_cached_list_without_wheel_and_failing_fetch_notes_cached_time(capsys, f
     assert NOTHING_FITS not in err
     assert UNREADABLE not in err
 
+    # Even with -q, like the unreadable-list note: the index couldn't be asked, so this isn't "nothing fits".
     _, _, err_quiet = run(capsys, *NOWHEELS, "--fix", "-q")
-    assert expected_note not in err_quiet
+    assert gap_wheels.calls == 3
+    assert expected_note in err_quiet and NOTHING_FITS not in err_quiet and UNREADABLE not in err_quiet
+
+
+def test_online_fetches_the_list_even_when_the_cached_one_fills_the_gap(capsys, fake_pypi, gap_wheels):
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 1
+    _, out, _ = run(capsys, *NOWHEELS, "--fix", "--online")
+    assert gap_wheels.calls == 2 and "  nowheels 0.9: win-arm64\n" in out
+    # --online doesn't read the cached list, so a failed fetch has no list to answer from.
+    gap_wheels.doc = urllib.error.URLError("temporary failure")
+    _, out, err = run(capsys, *NOWHEELS, "--fix", "--online")
+    assert gap_wheels.calls == 3 and "  nowheels 0.9: win-arm64\n" not in out
+    assert UNREADABLE in err and "fetched at" not in err
 
 
 def test_cached_list_older_than_limit_is_fetched_again(capsys, fake_pypi, gap_wheels, monkeypatch):
