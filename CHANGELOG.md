@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `--fix` fetches the gap wheel list once before concluding "no wheel on the gap wheel index fills these gaps" from a cached list, and falls back to the cached list with its fetch time if that fetch fails. The list is kept in the cache for 1 hour instead of 24 hours, enough to avoid CI matrix stampedes while picking up newly published wheels promptly. (#612, thanks [@dianatofficial](https://github.com/dianatofficial))
 - Requirements files: an include cycle (two files that include each other, or a file that includes itself, with `-r` or `-c`) is now an input error naming the chain, as pip refuses it, instead of being read once and reported as a clean result. (#616, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - The MCP server's tools keep the notes that explain an empty `gap_wheels` even when the project sets `quiet = true`, so a client can still tell "no wheel fills these gaps" from "wasn't checked" or "--fix is off with another index". (#617, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - `--github-annotations --fix` puts the full stop before the pip command instead of after it, so copying the command from an annotation no longer gives pip a version ending in a full stop. (#615, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
