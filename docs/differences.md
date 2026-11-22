@@ -12,10 +12,10 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 
 ## Version ranges
 
-- **What wheelgap assumes:** A version range or bare name in a requirements file is evaluated at the newest matching release published on the index (see [Version ranges](how-it-works.md#version-ranges)). With `--deps`, wheelgap resolves dependencies top-down without backtracking.
+- **What wheelgap assumes:** A version range or bare name in a requirements file is evaluated at the newest matching release published on the index, picked by pip's rule (see [Version ranges](how-it-works.md#version-ranges)). With `--deps`, wheelgap resolves dependencies top-down without backtracking.
 - **What pip and uv do:** Their resolvers solve the whole set of requirements together and backtrack when two requirements conflict, so another requirement's bound can make them pick an older release than the newest one that matches.
 - **When it changes the answer:** When a resolver settles on an older release, its files can differ from the newest release's in either direction: an older release without the wheel the newest has (wheelgap says `wheel`, the install builds or fails), or the reverse. Pin the versions you install to check exactly those.
-- **Tracking:** Documented in [How it works](how-it-works.md#version-ranges); resolving unpinned requirements the way `uv pip install` does in Dockerfiles is [#643](https://github.com/wheelgap/wheelgap/issues/643).
+- **Tracking:** Backtracking is by design; documented in [How it works](how-it-works.md#version-ranges). uv's rule for picking a release for one range also differs from pip's (it ignores a `Requires-Python` upper bound, for example), which is why `--dockerfile-inputs` refuses an unpinned requirement under `uv pip install`; reading those ranges the way uv does is [#643](https://github.com/wheelgap/wheelgap/issues/643).
 
 ## Python patch releases
 
@@ -27,8 +27,8 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 ## Pre-installed packages
 
 - **What wheelgap assumes:** Under `--dockerfile-inputs`, each requirement file is evaluated as a clean, fresh install into the target image.
-- **What pip and uv do:** `pip install` inspects the image's existing `site-packages` directory and leaves an already installed package untouched if it satisfies the requirement.
-- **When it changes the answer:** A pre-installed dependency whose newest release on the index lacks wheels is flagged as a source build or gap by wheelgap, whereas pip skips installing or compiling it.
+- **What pip and uv do:** Without `--upgrade`, `pip install` and `uv pip install` leave a package already installed in the image (from the base image or an earlier `RUN`) untouched if it satisfies the requirement.
+- **When it changes the answer:** Only for unpinned requirements on a line without `--upgrade`: a pre-installed dependency whose newest release on the index lacks wheels is flagged as a source build or gap by wheelgap, whereas pip skips installing or compiling it.
 - **Tracking:** Tracked in [#636](https://github.com/wheelgap/wheelgap/issues/636).
 
 ## Requirements file hashes
@@ -54,14 +54,14 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 
 ## User and system configuration
 
-- **What wheelgap assumes:** User and system configuration files (`pip.conf` or `pip.ini`, `~/.config/uv/uv.toml`, `/etc/uv/uv.toml`) are not read, and `PIP_*` and `UV_*` environment variables never change which files are checked. Some of those variables are read only to decide which package names may be sent to PyPI (see [Which package names leave the run](how-it-works.md#pypi-origin)).
+- **What wheelgap assumes:** User and system configuration files (`pip.conf` or `pip.ini`, `~/.config/uv/uv.toml`, `/etc/uv/uv.toml`) are not read, and `PIP_*` and `UV_*` environment variables never change which files are checked. Some of those variables are read only to refuse or skip a feature whose answer they would make wrong, such as `--deps` under `PIP_INDEX_URL`, and to decide which package names may be sent to PyPI (see [Which package names leave the run](how-it-works.md#pypi-origin)).
 - **What pip and uv do:** Installers load configuration from user and system configuration paths and respect environment variables that set index URLs and other options.
 - **When it changes the answer:** If the installing machine's configuration points pip or uv at another index or changes how files are picked, wheelgap's answer is still PyPI's (or that of the `--index-url` passed to wheelgap).
 - **Tracking:** Documented in [Which package names leave the run](how-it-works.md#pypi-origin).
 
 ## uv.lock Requires-Python bounds
 
-- **What wheelgap assumes:** `uv.lock` is evaluated following `uv sync`, with and without `--online`, which checks only the lower bound of `Requires-Python`. A file excluded only by an upper bound (such as `<3.15` or `!=3.15.*`) still counts. With `--online`, the report also says where pip would refuse such a file; without it the lock doesn't record each file's `Requires-Python`, so wheelgap can't tell.
+- **What wheelgap assumes:** `uv.lock` is evaluated following `uv sync`, with and without `--online` (after 0.13.0; 0.13.0 followed pip with `--online`), which checks only the lower bound of `Requires-Python`. A file excluded only by an upper bound (such as `<3.15` or `!=3.15.*`) still counts. With `--online`, the report also says where pip would refuse such a file; without it the lock doesn't record each file's `Requires-Python`, so wheelgap can't tell.
 - **What pip and uv do:** `uv sync` installs the locked release ignoring upper bounds; `pip install` (from a requirements file exported from the lock, for example) enforces both lower and upper bounds of `Requires-Python`.
 - **When it changes the answer:** A locked package whose `Requires-Python` specifies `<3.15` will install under `uv sync` on Python 3.15, but pip would refuse to install it.
 - **Tracking:** Documented in [uv.lock](inputs.md#uvlock); the rule was settled in [#544](https://github.com/wheelgap/wheelgap/issues/544).
