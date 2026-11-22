@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -269,10 +270,13 @@ class FakeFiles:
     """Files served over fake HTTPS (see fake_files): .files maps a filename to its bytes (or to an exception to raise,
     or a function that returns the response), .calls lists URLs."""
 
+    current = None
+
     def __init__(self):
         self.files: dict[str, object] = {}
         self.calls: list[str] = []
         self.timeouts: list[float | None] = []
+        FakeFiles.current = self
 
 
 @pytest.fixture
@@ -300,7 +304,8 @@ def fake_files(monkeypatch):
         return body() if callable(body) else io.BytesIO(body)  # type: ignore[arg-type]
 
     monkeypatch.setattr(pypi._OPENER, "open", open_)
-    return served
+    yield served
+    FakeFiles.current = None
 
 
 @pytest.fixture
@@ -427,10 +432,19 @@ def fake_pypi(monkeypatch, tracker):
 
         def entries(fs):
             # With a URL, as PyPI gives them; fake_files serves it.
-            return [
-                {"url": f"https://files.example/{e['filename']}", **e}
-                for e in (f if isinstance(f, dict) else {"filename": f} for f in fs)
-            ]
+            res = []
+            for f in fs:
+                e = dict(f) if isinstance(f, dict) else {"filename": f}
+                if FakeFiles.current and e["filename"] in FakeFiles.current.files:
+                    body = FakeFiles.current.files[e["filename"]]
+                    if isinstance(body, (bytes, bytearray)):
+                        e["digests"] = {"sha256": hashlib.sha256(body).hexdigest()}
+                elif name == "fastlib" and "digests" not in e:
+                    e["digests"] = {"sha256": ["00", "aa"]}
+                elif name == "nowheels" and "digests" not in e:
+                    e["digests"] = {"sha256": "00"}
+                res.append({"url": f"https://files.example/{e['filename']}", **e})
+            return res
 
         info = {"version": version}
         if "_project_urls" in versions:
@@ -457,7 +471,7 @@ def _simple_files(name):
             item = {
                 "filename": entry["filename"],
                 "url": f"https://files.example/{entry['filename']}",
-                "hashes": {},
+                "hashes": entry.get("hashes") or entry.get("digests", {}),
             }
             if entry.get("yanked"):
                 item["yanked"] = True  # PEP 592: a bool or a reason string

@@ -1099,17 +1099,36 @@ def previous_release(name: str, version: str) -> tuple[str, list[tuple[str, str 
 
 def _entry_sha256(entry: dict) -> str | None:
     digests = entry.get("digests")
-    if isinstance(digests, dict) and isinstance(digests.get("sha256"), str):
-        return digests["sha256"].lower()
+    if isinstance(digests, dict):
+        sha = digests.get("sha256")
+        if isinstance(sha, str):
+            return sha.lower()
+        if isinstance(sha, (set, list, tuple)):
+            for s in sha:
+                if isinstance(s, str):
+                    return s.lower()
     if isinstance(entry.get("sha256"), str):
         return entry["sha256"].lower()
     return None
 
 
+def _entry_has_sha256(entry: dict, hashes: set[str]) -> bool:
+    digests = entry.get("digests")
+    if isinstance(digests, dict):
+        sha = digests.get("sha256")
+        if isinstance(sha, (set, list, tuple)):
+            return any(isinstance(s, str) and s.lower() in hashes for s in sha)
+        if isinstance(sha, str) and sha.lower() in hashes:
+            return True
+    if isinstance(entry.get("sha256"), str) and entry["sha256"].lower() in hashes:
+        return True
+    return False
+
+
 def _filter_hashes(pkg: Package, urls: list[dict]) -> list[dict] | None:
     if not pkg.hashes:
         return urls
-    matching = [u for u in urls if _entry_sha256(u) in pkg.hashes]
+    matching = [u for u in urls if _entry_has_sha256(u, pkg.hashes)]
     if not matching:
         origin = pkg.origin or "requirements.txt"
         pkg.error = f"none of the hashes in {origin} matches a file of {pkg.name} {pkg.version}"
@@ -1117,7 +1136,7 @@ def _filter_hashes(pkg: Package, urls: list[dict]) -> list[dict] | None:
     pkg.hash_rejected = {
         u["filename"]: f"its hash isn't listed in {pkg.origin or 'requirements.txt'}"
         for u in urls
-        if _entry_sha256(u) not in pkg.hashes and u.get("filename", "").endswith(".whl")
+        if not _entry_has_sha256(u, pkg.hashes) and u.get("filename", "").endswith(".whl")
     }
     return matching
 
@@ -1151,6 +1170,7 @@ def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> 
             pkg.version_from_index = True
             filtered = _filter_hashes(pkg, urls)
             if filtered is None:
+                pkg.found_on_pypi = base == DEFAULT_INDEX
                 return pkg
             urls = filtered
             names = [u["filename"] for u in urls if not u.get("yanked")]
@@ -1163,9 +1183,11 @@ def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> 
                     f"{pkg.version} was uploaded after exclude-newer ({describe(pkg.exclude_newer)}), "
                     "so uv won't install it"
                 )
+                pkg.found_on_pypi = base == DEFAULT_INDEX
                 return pkg
             filtered = _filter_hashes(pkg, urls)
             if filtered is None:
+                pkg.found_on_pypi = base == DEFAULT_INDEX
                 return pkg
             urls = filtered
             live = [u for u in urls if _supports_python(u, python)]
@@ -1181,6 +1203,7 @@ def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> 
             pkg.version_from_index = True
             filtered = _filter_hashes(pkg, urls)
             if filtered is None:
+                pkg.found_on_pypi = base == DEFAULT_INDEX
                 return pkg
             urls = filtered
             names = [u["filename"] for u in urls if not u.get("yanked")]
