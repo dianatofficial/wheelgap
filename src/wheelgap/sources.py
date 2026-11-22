@@ -2241,20 +2241,47 @@ def _finalize_requirements(
     marker_constraint_specs: dict[str, list[tuple[str, str]]] = {}
     constraint_errors: dict[str, str] = {}
     for pkg in pkgs:
-        if pkg.skip or pkg.version or not (entries := by_name.get(pkg.key)):
+        if pkg.skip or not (entries := by_name.get(pkg.key)):
             continue
         # --deps applies a marked constraint per target (resolve_deps), so only the unmarked ones can break it here.
-        if unmarked_error := _constraint_error([entry for entry in entries if not entry.markers]):
+        unmarked = [entry for entry in entries if not entry.markers]
+        if unmarked_error := _constraint_error(unmarked):
             constraint_errors[pkg.key] = unmarked_error
         if any(entry.markers for entry in entries):
             pkg.error = "constraint has an environment marker; target-dependent constraints aren't supported"
         elif unmarked_error:
             pkg.error = unmarked_error
-        elif pins := _exact_pins(entries):
-            pkg.version, pkg.spec = next(iter(pins.values())), None
+        elif pkg.version:
+            for entry in unmarked:
+                if entry.version and canonicalize_version(entry.version) != canonicalize_version(pkg.version):
+                    pkg.error = (
+                        f"requirement {pkg.name}=={pkg.version} conflicts with "
+                        f"the constraint {entry.name}=={entry.version} (pip refuses this)"
+                    )
+                    break
+                elif entry.spec and not SpecifierSet(entry.spec).contains(pkg.version, prereleases=True):
+                    pkg.error = (
+                        f"requirement {pkg.name}=={pkg.version} conflicts with "
+                        f"the constraint {entry.name}{entry.spec} (pip refuses this)"
+                    )
+                    break
+        elif pins := _exact_pins(unmarked):
+            pin_version = next(iter(pins.values()))
+            if pkg.spec and not SpecifierSet(pkg.spec).contains(pin_version, prereleases=True):
+                entry = next(
+                    e
+                    for e in unmarked
+                    if e.version and canonicalize_version(e.version) == canonicalize_version(pin_version)
+                )
+                pkg.error = (
+                    f"requirement {pkg.name}{pkg.spec} conflicts with "
+                    f"the constraint {entry.name}=={pin_version} (pip refuses this)"
+                )
+            else:
+                pkg.version, pkg.spec = pin_version, None
         else:
             spec = SpecifierSet(pkg.spec or "")
-            for entry in entries:
+            for entry in unmarked:
                 spec &= SpecifierSet(entry.spec or "")
             pkg.spec = str(spec) or None
     # A constraint on a package the file doesn't require only ever counts as a transitive dep's specifier,
