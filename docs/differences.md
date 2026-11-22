@@ -6,16 +6,16 @@ When an issue listed on this page is resolved, update or remove its entry in the
 
 wheelgap's goal is to predict whether `pip` or `uv` will install a prebuilt wheel, build from source, or fail. In most cases, wheelgap's answer matches the installer exactly. However, there are known scenarios where wheelgap's model is intentionally simpler than a full installer or package resolver, or where behavior is tracked for a future release.
 
-This page summarizes each difference, what wheelgap assumes, what installers do, and when it affects the reported verdict.
+This page summarizes each difference, what wheelgap assumes, what installers do, and when it affects the reported verdict. Installer behavior is as checked in the linked issue (pip 26.3 and uv 0.13.1 unless it says otherwise) or as stated in the linked docs section.
 
 ---
 
 ## Version ranges
 
-- **What wheelgap assumes:** A version range or bare name in a requirements file is evaluated at the newest matching release published on the index (see [Version ranges](how-it-works.md#version-ranges)). With `--deps`, wheelgap resolves dependencies top-down without full backtracking.
-- **What pip and uv do:** Full package resolvers (`pip` 24.3+, `uv` 0.5+) solve the entire dependency graph simultaneously, selecting a mutually compatible version that may be older than the latest release.
-- **When it changes the answer:** A package whose newest release lacks wheels may have older compatible releases with wheels that a full resolver would pick.
-- **Tracking:** Documented in [How it works](how-it-works.md#version-ranges) and tracked for unpinned Dockerfile requirements in [#643](https://github.com/wheelgap/wheelgap/issues/643).
+- **What wheelgap assumes:** A version range or bare name in a requirements file is evaluated at the newest matching release published on the index (see [Version ranges](how-it-works.md#version-ranges)). With `--deps`, wheelgap resolves dependencies top-down without backtracking.
+- **What pip and uv do:** Their resolvers solve the whole set of requirements together and backtrack when two requirements conflict, so another requirement's bound can make them pick an older release than the newest one that matches.
+- **When it changes the answer:** When a resolver settles on an older release, its files can differ from the newest release's in either direction: an older release without the wheel the newest has (wheelgap says `wheel`, the install builds or fails), or the reverse. Pin the versions you install to check exactly those.
+- **Tracking:** Documented in [How it works](how-it-works.md#version-ranges); resolving unpinned requirements the way `uv pip install` does in Dockerfiles is [#643](https://github.com/wheelgap/wheelgap/issues/643).
 
 ## Python patch releases
 
@@ -40,49 +40,49 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 
 ## Additional index URLs
 
-- **What wheelgap assumes:** `--index-url`, `--extra-index-url`, and `--find-links` options inside requirements files are not read; packages are checked against PyPI (or the global `--index-url` passed to wheelgap).
-- **What pip and uv do:** `pip` and `uv` query all specified index URLs and find-links locations, finding prebuilt wheels published on external or private repositories (such as PyTorch or CUDA package indexes).
-- **When it changes the answer:** Dependencies hosted only on an external index appear as `missing` or `source` when PyPI lacks a matching prebuilt wheel.
+- **What wheelgap assumes:** `--index-url`, `--extra-index-url`, and `--find-links` options inside requirements files are not read; packages are checked against PyPI (or the `--index-url` passed to wheelgap).
+- **What pip and uv do:** `pip` and `uv` query the indexes and find-links locations the file names, finding prebuilt wheels published on external or private repositories (such as PyTorch or CUDA package indexes).
+- **When it changes the answer:** A package's files on the other index can differ from PyPI's: a wheel published only there is not seen, and a private package with a namesake on PyPI is judged by the PyPI project's files.
 - **Tracking:** Tracked in [#632](https://github.com/wheelgap/wheelgap/issues/632).
 
 ## Pre-releases and prefer-binary
 
-- **What wheelgap assumes:** `--pre` and `--prefer-binary` options in requirements files are skipped.
-- **What pip and uv do:** `pip` with `--pre` considers alpha, beta, and release candidates; with `--prefer-binary`, pip chooses an older release that has a prebuilt wheel over a newer release that only offers an sdist.
-- **When it changes the answer:** A package where only a pre-release has prebuilt wheels, or where `--prefer-binary` would pick an older wheel, is reported as `source`.
+- **What wheelgap assumes:** `--pre` and `--prefer-binary` lines in requirements files are skipped, so an unpinned requirement is checked at the newest stable release (a pre-release counts only when no stable release matches).
+- **What pip does:** With `--pre`, pip takes the newest release including alphas, betas and release candidates; with `--prefer-binary`, it takes an older release that has a wheel over a newer one that only has an sdist. uv ignores both lines with a warning.
+- **When it changes the answer:** pip installs a different release from the one wheelgap checked, so any status can be off in either direction: for example the stable release has a wheel (`wheel`) but the pre-release pip installs under `--pre` has none.
 - **Tracking:** Tracked in [#634](https://github.com/wheelgap/wheelgap/issues/634).
 
 ## User and system configuration
 
-- **What wheelgap assumes:** Configuration files (`pip.conf`, `~/.config/uv/uv.toml`) and environment variables (`PIP_*`, `UV_*`) on the machine running wheelgap are never read.
-- **What pip and uv do:** Installers load configuration from user and system configuration paths and respect all environment variables that configure index URLs, proxies, and caching.
-- **When it changes the answer:** Custom indexes or local environment variables that affect package resolution in a local environment do not alter wheelgap's output.
-- **Tracking:** See [Configuration](configuration.md) and tracked for Dockerfile environments in [#642](https://github.com/wheelgap/wheelgap/issues/642).
+- **What wheelgap assumes:** User and system configuration files (`pip.conf` or `pip.ini`, `~/.config/uv/uv.toml`, `/etc/uv/uv.toml`) are not read, and `PIP_*` and `UV_*` environment variables never change which files are checked. Some of those variables are read only to decide which package names may be sent to PyPI (see [Which package names leave the run](how-it-works.md#pypi-origin)).
+- **What pip and uv do:** Installers load configuration from user and system configuration paths and respect environment variables that set index URLs and other options.
+- **When it changes the answer:** If the installing machine's configuration points pip or uv at another index or changes how files are picked, wheelgap's answer is still PyPI's (or that of the `--index-url` passed to wheelgap).
+- **Tracking:** Documented in [Which package names leave the run](how-it-works.md#pypi-origin).
 
 ## uv.lock Requires-Python bounds
 
-- **What wheelgap assumes:** `uv.lock` is evaluated following `uv sync`, which enforces only the lower bound of `Requires-Python`. When run with `--online`, files excluded by an upper bound (such as `<3.15` or `!=3.14.*`) are still checked, and the report notes where pip would refuse them.
-- **What pip and uv do:** `uv sync` installs the locked release ignoring upper bounds; `pip install` strictly enforces both lower and upper bounds of `Requires-Python`.
+- **What wheelgap assumes:** `uv.lock` is evaluated following `uv sync`, with and without `--online`, which checks only the lower bound of `Requires-Python`. A file excluded only by an upper bound (such as `<3.15` or `!=3.15.*`) still counts. With `--online`, the report also says where pip would refuse such a file; without it the lock doesn't record each file's `Requires-Python`, so wheelgap can't tell.
+- **What pip and uv do:** `uv sync` installs the locked release ignoring upper bounds; `pip install` (from a requirements file exported from the lock, for example) enforces both lower and upper bounds of `Requires-Python`.
 - **When it changes the answer:** A locked package whose `Requires-Python` specifies `<3.15` will install under `uv sync` on Python 3.15, but pip would refuse to install it.
-- **Tracking:** Documented in [uv.lock](inputs.md#uvlock) and tracked in [#544](https://github.com/wheelgap/wheelgap/issues/544).
+- **Tracking:** Documented in [uv.lock](inputs.md#uvlock); the rule was settled in [#544](https://github.com/wheelgap/wheelgap/issues/544).
 
 ## File-name casing
 
-- **What wheelgap assumes:** Files referenced in inputs (such as `-r requirements.txt` or Dockerfile `COPY` instructions) are resolved using the host operating system's filesystem rules.
-- **What pip and uv do:** In case-sensitive environments (such as standard Linux Docker containers), case mismatches (e.g. `Requirements.txt` vs `requirements.txt`) fail immediately.
-- **When it changes the answer:** Running wheelgap on macOS or Windows may find a file whose casing differs from the repository filename, whereas building the Docker container on Linux fails.
-- **Tracking:** Tracked for Dockerfile inputs in [#635](https://github.com/wheelgap/wheelgap/issues/635).
+- **What wheelgap assumes:** A file a requirements file names with `-r` or `-c` is found as the host's file system finds it. `--dockerfile-inputs` matches `COPY` paths with exact case on every host (after 0.13.0).
+- **What pip and uv do:** On a case-sensitive file system (such as Linux, and a Linux Docker build), a name that differs only in case (`Base.txt` vs `base.txt`) is not found.
+- **When it changes the answer:** Running `wheelgap requirements.txt` on macOS or Windows can follow `-r Base.txt` to `base.txt`, where pip on Linux stops with an error.
+- **Tracking:** Listed as a later step in [#635](https://github.com/wheelgap/wheelgap/issues/635), which fixed the Dockerfile case.
 
 ## Source builds
 
-- **What wheelgap assumes:** A `source` status indicates that PyPI publishes an sdist for that version, meaning an installer will attempt a source build.
+- **What wheelgap assumes:** A `source` status indicates that the index publishes an sdist for that version, meaning an installer will attempt a source build.
 - **What pip and uv do:** `pip` and `uv` invoke PEP 517 build backends, which compile C, C++, or Rust extensions using host compilers and system header libraries (e.g. `gcc`, `libpq-dev`).
 - **When it changes the answer:** wheelgap reports whether a source build will be attempted, not whether the build will succeed on the target machine.
-- **Tracking:** Documented in [FAQ: Why does it say source](faq.md#why-does-it-say-source-when-pip-installs-a-wheel).
+- **Tracking:** None; this is by design.
 
 ## Constraints files
 
-- **What wheelgap assumes:** Pinned dependencies (`name==1.2.3`) in requirements files are checked at the pinned version directly without checking them against `-c constraints.txt` lines in the same file.
-- **What pip and uv do:** `pip` validates pinned requirements against constraints files, and fails with a version conflict if a pin contradicts a constraint.
-- **When it changes the answer:** wheelgap reports wheel coverage for the pinned version even if pip would reject the install due to a conflicting constraint.
+- **What wheelgap assumes:** A requirement is checked without testing it against the `-c constraints.txt` file it is installed with. A pin (`idna==3.6`) is checked at its own version, and a range (`idna>=3.8`) is checked at the constraint's pin (`idna==3.7`) even when the pin is outside the range.
+- **What pip and uv do:** `pip install` and `uv pip install` apply the constraint to the requirement and refuse the install when the two conflict.
+- **When it changes the answer:** wheelgap reports wheel coverage for a version even though pip and uv refuse the install. `--deps` resolves the set and catches the conflict.
 - **Tracking:** Tracked in [#631](https://github.com/wheelgap/wheelgap/issues/631).
