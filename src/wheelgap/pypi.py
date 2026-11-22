@@ -22,7 +22,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import as_completed
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1112,7 +1112,7 @@ def _entry_sha256(entry: dict) -> str | None:
     return None
 
 
-def _entry_has_sha256(entry: dict, hashes: set[str]) -> bool:
+def _entry_has_sha256(entry: dict, hashes: Collection[str]) -> bool:
     digests = entry.get("digests")
     if isinstance(digests, dict):
         sha = digests.get("sha256")
