@@ -101,6 +101,11 @@ class Package:
     python_rejected_yanked: frozenset[str] = frozenset()
     # Files admitted by uv that pip would refuse for this Python.
     pip_refuses: dict[str, str] = field(default_factory=dict)
+    # sha256 hashes listed on the requirement line in a requirements file (--hash=sha256:... or --hash sha256:...).
+    # If not empty, only files whose sha256 matches one of these are accepted.
+    hashes: frozenset[str] = frozenset()
+    # Files of a pinned release whose sha256 hash was not listed in requirements, mapped to their --explain reason.
+    hash_rejected: dict[str, str] = field(default_factory=dict)
     # Distribution selection policy from requirements files or uv project configuration.
     no_binary: bool = False
     only_binary: bool = False
@@ -1918,17 +1923,17 @@ def _add_extras(source: Source, wanted: list[str]) -> None:
         pkg.exclude_newer = source.cutoff_for(pkg.key)
 
 
-def requirement_to_package(text: str, origin: str) -> Package:
+def requirement_to_package(text: str, origin: str, hashes: frozenset[str] = frozenset()) -> Package:
     try:
         req = Requirement(text)
     except InvalidRequirement as e:
         raise SourceError(f"{origin}: can't parse requirement {text!r}: {e}") from None
     markers = [str(req.marker)] if req.marker else None
     if req.url:
-        return Package(req.name, None, skip="url", origin=origin, markers=markers)
+        return Package(req.name, None, skip="url", origin=origin, markers=markers, hashes=hashes)
     version = _pinned_version(req)
     spec = str(req.specifier) if req.specifier and version is None else None
-    return Package(req.name, version, origin=origin, markers=markers, spec=spec)
+    return Package(req.name, version, origin=origin, markers=markers, spec=spec, hashes=hashes)
 
 
 # "name @ url", "name@url" and "name[extra] @ url": PEP 508 direct references, which Requirement parses.
@@ -2361,13 +2366,15 @@ _LONG_LINE_OPTIONS = {name: entry for entry in _REQUIREMENT_LINE_OPTIONS for nam
 _SHORT_LINE_OPTIONS = {name: entry for entry in _REQUIREMENT_LINE_OPTIONS for name in entry[0] if len(name) == 2}
 
 
-def _requirement_options(text: str, where: str) -> tuple[bool, list[tuple[str, str]], list[tuple[str, str]]]:
+def _requirement_options(
+    text: str, where: str
+) -> tuple[bool, list[tuple[str, str]], list[tuple[str, str]], frozenset[str]]:
     """Reads the options after a requirement (`name>=1 --no-binary name`) as pip's optparse reads them: long options
     by any unambiguous prefix, `--opt=value`, `-fVALUE`. Returns whether there's a --hash, each --no-binary or
-    --only-binary as (long name, value) in order, for the install's format control, and what pip ignores there, for
+    --only-binary as (long name, value) in order, for the install's format control, what pip ignores there, for
     a note: each option as
     (the name it was written with, its long name), and words that aren't options, which optparse sets aside, as one
-    entry. SourceError where pip refuses
+    entry, and the frozenset of sha256 digests from --hash options. SourceError where pip refuses
     the line, or where it applies an option that wheelgap doesn't read."""
     try:
         tokens = shlex.split(text)
@@ -2377,6 +2384,7 @@ def _requirement_options(text: str, where: str) -> tuple[bool, list[tuple[str, s
     hashed = False
     formats: list[tuple[str, str]] = []
     ignored: list[tuple[str, str]] = []
+    sha256_hashes: set[str] = set()
     k = 0
     while k < len(tokens):
         token = tokens[k]
@@ -2418,12 +2426,17 @@ def _requirement_options(text: str, where: str) -> tuple[bool, list[tuple[str, s
         # The checks pip's parser callbacks make (the first is a CommandError, the others optparse errors).
         if kind == "format" and given_value.startswith("-"):
             raise SourceError(f"{refused} --no-binary / --only-binary option requires 1 argument.")
-        if kind == "hash" and ":" not in given_value:
-            raise SourceError(
-                f"{refused} Arguments to --hash must be a hash name followed by a value, like --hash=sha256:abcde..."
-            )
-        if kind == "hash" and given_value.split(":", 1)[0] not in ("sha256", "sha384", "sha512"):
-            raise SourceError(f"{refused} Allowed hash algorithms for --hash are sha256, sha384, sha512.")
+        if kind == "hash":
+            if ":" not in given_value:
+                raise SourceError(
+                    f"{refused} Arguments to --hash must be a hash name followed by a value, "
+                    "like --hash=sha256:abcde..."
+                )
+            algo, _, digest = given_value.partition(":")
+            if algo not in ("sha256", "sha384", "sha512"):
+                raise SourceError(f"{refused} Allowed hash algorithms for --hash are sha256, sha384, sha512.")
+            if algo == "sha256":
+                sha256_hashes.add(digest.lower())
         if kind == "requirement" and "=" not in given_value:
             raise SourceError(f"{refused} Arguments to {name} must be of the form KEY=VAL")
         if kind == "feature" and value not in _USE_FEATURE_CHOICES:
@@ -2443,7 +2456,7 @@ def _requirement_options(text: str, where: str) -> tuple[bool, list[tuple[str, s
         hashed = hashed or kind == "hash"
         if kind == "format" and given_value:
             formats.append((name, given_value))  # the value pip's callback reads, never a word after another option
-    return hashed, formats, ignored
+    return hashed, formats, ignored, frozenset(sha256_hashes)
 
 
 def _read_requirements(
@@ -2590,9 +2603,10 @@ def _read_requirements(
             first_option = next((k for k, word in enumerate(words) if word.startswith("-")), len(words))
             options = " ".join(word for word in words[first_option:] if word)
             hashed = False
+            req_hashes: frozenset[str] = frozenset()
             if options:
                 where = _shown(path, stack) + (f":{number}" if number is not None else "")
-                hashed, formats, ignored = _requirement_options(options, where)
+                hashed, formats, ignored, req_hashes = _requirement_options(options, where)
                 if ignored_options is not None:
                     for shown, option in ignored:
                         note = f"{where}: pip ignores {shown} after a requirement"
@@ -2609,16 +2623,16 @@ def _read_requirements(
                 compiler_signs.append("hash")
             line = " ".join(words[:first_option]).strip()
             if line.startswith((".", "/")):
-                append(Package(line, None, skip="path", origin=path.name))
+                append(Package(line, None, skip="path", origin=path.name, hashes=req_hashes))
                 continue
             if "://" in line and not _NAMED_URL_RE.match(line):
                 # A bare URL (git+ssh://git@github.com/org/repo.git#egg=foo): never from the index.
                 # "name @ url" lines are left to Requirement, which knows the name and markers.
                 egg = _EGG_RE.search(line)
                 name = egg.group(1) if egg else line.split(";", 1)[0].strip()
-                append(Package(name, None, skip="url", origin=path.name))
+                append(Package(name, None, skip="url", origin=path.name, hashes=req_hashes))
                 continue
-            append(requirement_to_package(line, path.name))
+            append(requirement_to_package(line, path.name, hashes=req_hashes))
             if req_lines is not None and not constraint:
                 req_lines.append(line)
     finally:

@@ -2285,6 +2285,25 @@ def test_requirements_options_after_a_requirement_keep_its_pin_and_hash_mode(tmp
         ("purewheel", None, ">=3"),
     ]
     assert source.compiled and source.specs == ["fastlib==2.0.0", "purewheel>=3"]
+    assert source.packages[0].hashes == frozenset({"aa"})
+    assert source.packages[1].hashes == frozenset()
+
+
+def test_requirements_hashes_preserved_for_both_spellings_and_continuation(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text(
+        "pkg_eq==1.0 --hash=sha256:1111\n"
+        "pkg_space==2.0 --hash sha256:2222\n"
+        "pkg_continued==3.0 \\\n"
+        "    --hash=sha256:3333 \\\n"
+        "    --hash sha256:4444\n"
+    )
+    source = parse_requirements(req)
+    assert [(p.name, p.version, p.hashes) for p in source.packages] == [
+        ("pkg_eq", "1.0", frozenset({"1111"})),
+        ("pkg_space", "2.0", frozenset({"2222"})),
+        ("pkg_continued", "3.0", frozenset({"3333", "4444"})),
+    ]
 
 
 @pytest.mark.parametrize(

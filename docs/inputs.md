@@ -412,8 +412,14 @@ build it. `--explain` says which option did it.
 
 The same two options written after a requirement (`albumentations>=0.3.2 --no-binary qudida,albumentations`, after
 0.13.0) are read too, and mean what pip makes of them: the option counts for the whole install, exactly as on a line
-of its own, not only for that requirement. `--hash` and `--config-settings` after a requirement are accepted as
-before.
+of its own, not only for that requirement. `--config-settings` after a requirement is accepted as before.
+
+`--hash` options (`--hash=sha256:…` or `--hash sha256:…`) limit which files may be installed: only release files with a
+listed `sha256` hash from PyPI's JSON API are accepted. Listing only the sdist's hash gives `source`, while listing
+only wheels for another platform gives `missing`. If none of the release's files match a listed hash, wheelgap sets an
+error (`unknown`: `none of the hashes in requirements.txt matches a file of NAME VERSION`). `--explain` notes why a
+wheel was left out: `its hash isn't listed in requirements.txt`. Because requirements files need the index to check
+hashes, `--offline` refuses a requirements file with unverified packages as before.
 
 Other options after a requirement are read as pip 26.3 reads them there (after 0.13.0). pip parses them and then
 ignores `-f` / `--find-links`, `-i` / `--index-url`, `--extra-index-url`, `--no-index`, `--pre`, `--prefer-binary`,
@@ -445,7 +451,7 @@ An include in a symlinked requirements file is read from the folder the link is 
 the link points into (after 0.13.0).
 
 **Skipped:** editable lines (`-e`), local paths (lines starting with `.` or `/`) and URLs (`git+https://…`,
-`name @ https://…`). Other pip options in the file, such as `--index-url` or `--hash`, are ignored: use wheelgap's
+`name @ https://…`). Other pip options in the file, such as `--index-url`, are ignored: use wheelgap's
 own [`--index-url`](cli.md#index-url) to look packages up on another index.
 
 **`--deps`:** with [`--deps`](cli.md#deps) a requirements file is resolved instead — every requirement line is a

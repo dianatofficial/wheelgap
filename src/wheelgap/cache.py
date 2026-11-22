@@ -87,9 +87,9 @@ def load_files(index: str, name: str, version: str) -> list[dict] | None:
 
 
 def save_files(index: str, name: str, version: str, files: list[dict]) -> None:
-    """Store a pinned release's file list. Only `filename`, `yanked` and `requires_python` are kept: they're all
-    fill() reads, and a file's URL (which a private mirror may sign) never reaches the disk."""
-    kept = [{k: f[k] for k in ("filename", "yanked", "requires_python") if k in f} for f in files]
+    """Store a pinned release's file list. `filename`, `yanked`, `requires_python` and `digests` are kept: they're
+    all fill() reads, and a file's URL (which a private mirror may sign) never reaches the disk."""
+    kept = [{k: f[k] for k in ("filename", "yanked", "requires_python", "digests", "sha256") if k in f} for f in files]
     _save(index, name, version, "files", kept)
 
 
