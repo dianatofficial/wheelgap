@@ -1,4 +1,3 @@
-import hashlib
 from pathlib import Path
 
 import pytest
@@ -36,20 +35,20 @@ FAKE_INDEX = {
     },
     "yanked": {"1.0": [{"filename": "yanked-1.0-py3-none-any.whl", "yanked": True}]},
     "halfyanked": {"2.0": [{"filename": "halfyanked-2.0-py3-none-any.whl", "yanked": True}, "halfyanked-2.0.tar.gz"]},
+    # Distinct sha256 digests, as PyPI's JSON API gives them, for requirements that pin --hash (#633).
     "hashpkg": {
         "1.0": [
-            {
-                "filename": "hashpkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl",
-                "digests": {"sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
-            },
-            {
-                "filename": "hashpkg-1.0-cp313-cp313-win_amd64.whl",
-                "digests": {"sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
-            },
-            {
-                "filename": "hashpkg-1.0.tar.gz",
-                "digests": {"sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
-            },
+            {"filename": "hashpkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl", "digests": {"sha256": "1" * 64}},
+            {"filename": "hashpkg-1.0-cp313-cp313-win_amd64.whl", "digests": {"sha256": "2" * 64}},
+            {"filename": "hashpkg-1.0.tar.gz", "digests": {"sha256": "3" * 64}},
+        ],
+    },
+    # A mirror that gives no digests for some files: pip checks those after the download.
+    "halfhashed": {
+        "1.0": [
+            {"filename": "halfhashed-1.0-cp313-cp313-manylinux_2_17_x86_64.whl"},
+            {"filename": "halfhashed-1.0-cp313-cp313-win_amd64.whl", "digests": {"sha256": "5" * 64}},
+            {"filename": "halfhashed-1.0.tar.gz", "digests": {"sha256": "6" * 64}},
         ],
     },
     # Only Linux wheels for a newer glibc / musl / macOS than a flag can lower the floor to: fine at the defaults,
@@ -270,13 +269,10 @@ class FakeFiles:
     """Files served over fake HTTPS (see fake_files): .files maps a filename to its bytes (or to an exception to raise,
     or a function that returns the response), .calls lists URLs."""
 
-    current = None
-
     def __init__(self):
         self.files: dict[str, object] = {}
         self.calls: list[str] = []
         self.timeouts: list[float | None] = []
-        FakeFiles.current = self
 
 
 @pytest.fixture
@@ -304,8 +300,7 @@ def fake_files(monkeypatch):
         return body() if callable(body) else io.BytesIO(body)  # type: ignore[arg-type]
 
     monkeypatch.setattr(pypi._OPENER, "open", open_)
-    yield served
-    FakeFiles.current = None
+    return served
 
 
 @pytest.fixture
@@ -432,19 +427,10 @@ def fake_pypi(monkeypatch, tracker):
 
         def entries(fs):
             # With a URL, as PyPI gives them; fake_files serves it.
-            res = []
-            for f in fs:
-                e = dict(f) if isinstance(f, dict) else {"filename": f}
-                if FakeFiles.current and e["filename"] in FakeFiles.current.files:
-                    body = FakeFiles.current.files[e["filename"]]
-                    if isinstance(body, (bytes, bytearray)):
-                        e["digests"] = {"sha256": hashlib.sha256(body).hexdigest()}
-                elif name == "fastlib" and "digests" not in e:
-                    e["digests"] = {"sha256": ["00", "aa"]}
-                elif name == "nowheels" and "digests" not in e:
-                    e["digests"] = {"sha256": "00"}
-                res.append({"url": f"https://files.example/{e['filename']}", **e})
-            return res
+            return [
+                {"url": f"https://files.example/{e['filename']}", **e}
+                for e in (f if isinstance(f, dict) else {"filename": f} for f in fs)
+            ]
 
         info = {"version": version}
         if "_project_urls" in versions:
@@ -471,7 +457,7 @@ def _simple_files(name):
             item = {
                 "filename": entry["filename"],
                 "url": f"https://files.example/{entry['filename']}",
-                "hashes": entry.get("hashes") or entry.get("digests", {}),
+                "hashes": {},
             }
             if entry.get("yanked"):
                 item["yanked"] = True  # PEP 592: a bool or a reason string

@@ -414,12 +414,16 @@ The same two options written after a requirement (`albumentations>=0.3.2 --no-bi
 0.13.0) are read too, and mean what pip makes of them: the option counts for the whole install, exactly as on a line
 of its own, not only for that requirement. `--config-settings` after a requirement is accepted as before.
 
-`--hash` options (`--hash=sha256:…` or `--hash sha256:…`) limit which files may be installed: only release files with a
-listed `sha256` hash from PyPI's JSON API are accepted. Listing only the sdist's hash gives `source`, while listing
-only wheels for another platform gives `missing`. If none of the release's files match a listed hash, wheelgap sets an
-error (`unknown`: `none of the hashes in requirements.txt matches a file of NAME VERSION`). `--explain` notes why a
-wheel was left out: `its hash isn't listed in requirements.txt`. Because requirements files need the index to check
-hashes, `--offline` refuses a requirements file with unverified packages as before.
+`--hash` options on a requirement (`--hash=sha256:…` or `--hash sha256:…`, after 0.13.0) limit which of the
+release's files pip may install, and wheelgap keeps only those: a file whose `sha256` from PyPI's JSON API is listed.
+Listing only the sdist's hash gives `source`, as pip and uv build it then; listing only another platform's wheels gives
+`missing`. If no file of the release has a listed hash, the package is `unknown` (`none of the hashes in
+requirements.txt matches a file of NAME VERSION`), as pip refuses the download. `--explain` names each wheel left
+out: `its hash isn't listed in requirements.txt`. As pip does, a file the index gives no `sha256` for (some mirrors
+behind `WHEELGAP_INDEX_URL`) isn't left out, since pip checks it after the download. Not read yet, so the answer is
+the one without them: `sha384` and `sha512` hashes (PyPI gives no such digest), `--hash` in a constraints file, and
+the lookups of [`--index-url`](cli.md#index-url). `--offline` refuses a requirements file as before: its
+files come from the index.
 
 Other options after a requirement are read as pip 26.3 reads them there (after 0.13.0). pip parses them and then
 ignores `-f` / `--find-links`, `-i` / `--index-url`, `--extra-index-url`, `--no-index`, `--pre`, `--prefer-binary`,

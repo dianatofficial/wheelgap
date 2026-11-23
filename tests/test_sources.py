@@ -2306,6 +2306,23 @@ def test_requirements_hashes_preserved_for_both_spellings_and_continuation(tmp_p
     ]
 
 
+def test_requirements_hashes_keep_sha256_only_lowercased(tmp_path):
+    # pip lowercases the hashes it's given, and only a sha256 can match a file on PyPI, which gives no other digest
+    # (pip 26.3 takes the sdist for `--hash=sha256:<sdist> --hash=sha512:<wheel>`). A line with only sha384/sha512
+    # hashes is read as without --hash: pip checks its pick after the download, which wheelgap can't do.
+    req = tmp_path / "requirements.txt"
+    req.write_text(
+        f"upper==1.0 --hash=sha256:{'AB' * 32}\n"
+        f"other==1.0 --hash=sha512:{'cd' * 64} --hash=sha384:{'cd' * 48}\n"
+        f"mixed==1.0 --hash=sha512:{'ef' * 64} --hash=sha256:{'12' * 32}\n"
+    )
+    assert [p.hashes for p in parse_requirements(req).packages] == [
+        frozenset({"ab" * 32}),
+        frozenset(),
+        frozenset({"12" * 32}),
+    ]
+
+
 @pytest.mark.parametrize(
     "line, ignored",
     [

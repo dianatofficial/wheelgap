@@ -22,7 +22,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 import zlib
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import as_completed
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1038,8 +1038,8 @@ def fill(
     # Only a pinned release is cached: the latest release, or a range's pick, can change at any upload.
     key = (base, pkg.key, pkg.version) if pkg.version else None
     cached = cache.load_files(*key) if key and read_cache and pkg.exclude_newer is None else None
-    if pkg.hashes and cached and any(_entry_sha256(f) is None for f in cached):
-        cached = None
+    if pkg.hashes and cached and any(_sha256(f) is None for f in cached):
+        cached = None  # saved before file hashes were kept (or the index gives none): ask again
     if key and read_cache and cached is not None:
         pkg.project_urls, pkg.home_page = cache.load_project_urls(*key)
     try:
@@ -1097,48 +1097,35 @@ def previous_release(name: str, version: str) -> tuple[str, list[tuple[str, str 
     return text, live
 
 
-def _entry_sha256(entry: dict) -> str | None:
+def _sha256(entry: dict) -> str | None:
+    """A JSON API file entry's sha256 (`digests.sha256`, lowercased), or None where the index gives none."""
     digests = entry.get("digests")
-    if isinstance(digests, dict):
-        sha = digests.get("sha256")
-        if isinstance(sha, str):
-            return sha.lower()
-        if isinstance(sha, (set, list, tuple)):
-            for s in sha:
-                if isinstance(s, str):
-                    return s.lower()
-    if isinstance(entry.get("sha256"), str):
-        return entry["sha256"].lower()
-    return None
-
-
-def _entry_has_sha256(entry: dict, hashes: Collection[str]) -> bool:
-    digests = entry.get("digests")
-    if isinstance(digests, dict):
-        sha = digests.get("sha256")
-        if isinstance(sha, (set, list, tuple)):
-            return any(isinstance(s, str) and s.lower() in hashes for s in sha)
-        if isinstance(sha, str) and sha.lower() in hashes:
-            return True
-    if isinstance(entry.get("sha256"), str) and entry["sha256"].lower() in hashes:
-        return True
-    return False
+    sha256 = digests.get("sha256") if isinstance(digests, dict) else None
+    return sha256.lower() if isinstance(sha256, str) else None
 
 
 def _filter_hashes(pkg: Package, urls: list[dict]) -> list[dict] | None:
+    """The files a requirement's `--hash` options let pip install, as pip's filter_unallowed_hashes picks them: when
+    some file's sha256 is listed, those files and any the index gives no sha256 for (pip checks those after the
+    download). When none is listed and the index gave every file's sha256, pip downloads its pick and refuses its
+    hash: sets pkg.error and returns None. When none is listed but some file has no sha256, wheelgap can't tell which
+    one pip would accept, so it keeps them all, as without --hash."""
     if not pkg.hashes:
         return urls
-    matching = [u for u in urls if _entry_has_sha256(u, pkg.hashes)]
-    if not matching:
-        origin = pkg.origin or "requirements.txt"
-        pkg.error = f"none of the hashes in {origin} matches a file of {pkg.name} {pkg.version}"
-        return None
+    origin = pkg.origin or "requirements.txt"
+    if not any(_sha256(u) in pkg.hashes for u in urls):
+        if urls and all(_sha256(u) is not None for u in urls):
+            pkg.error = f"none of the hashes in {origin} matches a file of {pkg.name} {pkg.version}"
+            return None
+        return urls
+    allowed = [u for u in urls if (sha256 := _sha256(u)) is None or sha256 in pkg.hashes]
+    kept = {id(u) for u in allowed}
     pkg.hash_rejected = {
-        u["filename"]: f"its hash isn't listed in {pkg.origin or 'requirements.txt'}"
+        u["filename"]: f"its hash isn't listed in {origin}"
         for u in urls
-        if not _entry_has_sha256(u, pkg.hashes) and u.get("filename", "").endswith(".whl")
+        if id(u) not in kept and u["filename"].endswith(".whl")
     }
-    return matching
+    return allowed
 
 
 def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> Package:
@@ -1183,7 +1170,6 @@ def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> 
                     f"{pkg.version} was uploaded after exclude-newer ({describe(pkg.exclude_newer)}), "
                     "so uv won't install it"
                 )
-                pkg.found_on_pypi = base == DEFAULT_INDEX
                 return pkg
             filtered = _filter_hashes(pkg, urls)
             if filtered is None:
