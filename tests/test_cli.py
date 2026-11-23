@@ -6053,3 +6053,15 @@ def test_uv_ignores_python_rejection_when_lower_bound_allows(requires, python, i
     from wheelgap.sources import uv_ignores_python_rejection
 
     assert uv_ignores_python_rejection(requires, python) is ignores
+
+
+def test_requirements_file_conflicting_with_constraint_fails_without_lookup(capsys, tmp_path, fake_pypi):
+    req = tmp_path / "requirements.txt"
+    req.write_text("-c cons.txt\nidna==3.6\n", encoding="utf-8")
+    (tmp_path / "cons.txt").write_text("idna==3.7\n", encoding="utf-8")
+    code, out, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64")
+    assert code == 1
+    assert "unknown" in out
+    expected = "could not check idna: requirement idna==3.6 conflicts with the constraint idna==3.7 (pip refuses this)"
+    assert expected in out
+    assert fake_pypi == []

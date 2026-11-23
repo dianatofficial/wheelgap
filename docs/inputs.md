@@ -442,10 +442,14 @@ An included file that can't be read (`-r FILE` or `-c FILE` naming a file that i
 names the including file and line, `requirements.txt:3: -r base.txt: file not found`; pip stops there too.
 
 **Constraint files** (`-c FILE`, `-cFILE`, `--constraint FILE` or `--constraint=FILE`) restrict unpinned requirements
-without adding packages. Exact constraints select a version; ranges are intersected. A constraint wheelgap can't apply
-leaves the package `unknown` rather than guessed: one with an environment marker, a URL or path, or two different
-exact versions. Constraint files given as a URL or an environment variable (`-c https://…`, `-c ${PIP_CONSTRAINT}`)
-are skipped.
+without adding packages. Exact constraints select a version; ranges are intersected. A requirement that conflicts with
+a constraint is an error (after 0.13.0), as pip refuses it: a pinned version that an exact constraint or a constraint's
+range leaves out, or an exact constraint that the requirement's range or another constraint leaves out. The package is
+reported `unknown` and the run fails. Versions match as pip matches them: `==1.9` and `==1.9.0` agree, and `==1.0`
+with `==1.0+cpu` is `1.0+cpu`. A constraint wheelgap can't apply leaves the package `unknown` rather than guessed: one
+with an environment marker (unless the requirement is pinned to a version it allows), a URL or path, or two exact
+versions that disagree. Constraint files given as a URL or an environment variable (`-c https://…`,
+`-c ${PIP_CONSTRAINT}`) are skipped.
 
 A `-r FILE` line inside a constraints file is read as pip reads it: `FILE` is a requirements file, so its packages
 are checked, while the constraints file's own lines stay constraints. A `-c` inside any file is a constraints file.
