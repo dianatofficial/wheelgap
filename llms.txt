@@ -13,7 +13,6 @@ The README and docs on `main` can describe changes that aren't on PyPI yet; `CHA
 - [Diagnosing a failed install](https://github.com/wheelgap/wheelgap/blob/main/docs/cli.md#--from-log-from-log): `--from-log install.log` finds the packages a pip, uv, Poetry or PDM install failed to build and the release with a wheel; a [pip installation report](https://github.com/wheelgap/wheelgap/blob/main/docs/inputs.md#pip-installation-report) (`pip install --dry-run --report`) is read as an input too
 - [Comparing two lockfiles](https://github.com/wheelgap/wheelgap#comparing-two-lockfiles): `wheelgap diff OLD NEW`, git refs such as `origin/main:uv.lock`, `--json`
 - [How it works](https://github.com/wheelgap/wheelgap#how-it-works): what is read offline, what is looked up on PyPI, environment markers
-- [Where wheelgap differs from pip and uv](https://github.com/wheelgap/wheelgap/blob/main/docs/differences.md): where wheelgap's answer can differ from pip's and uv's, and why
 - [Recipes](https://github.com/wheelgap/wheelgap/blob/main/docs/recipes.md): multi-arch images, free-threading readiness, monorepos, agents and scripts
 - [JSON schema](https://github.com/wheelgap/wheelgap/blob/main/docs/wheelgap-output.schema.json): the shape of `--json` output on `main`; later versions may add keys
 

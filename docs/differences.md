@@ -12,16 +12,16 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 
 ## Version ranges
 
-- **What wheelgap assumes:** A version range or bare name in a requirements file is evaluated at the newest matching release published on the index, picked by pip's rule (see [Version ranges](how-it-works.md#version-ranges)). With `--deps`, wheelgap resolves dependencies top-down without backtracking.
+- **What wheelgap assumes:** A version range or bare name in a requirements file is evaluated at the newest matching release published on the index, picked by pip's rule (see [Version ranges](how-it-works.md#version-ranges)). With `--deps`, wheelgap's small resolver doesn't backtrack: where pip would go back to an older release, it stops with an error rather than guess (see [`--deps`](cli.md#deps)).
 - **What pip and uv do:** Their resolvers solve the whole set of requirements together and backtrack when two requirements conflict, so another requirement's bound can make them pick an older release than the newest one that matches.
 - **When it changes the answer:** When a resolver settles on an older release, its files can differ from the newest release's in either direction: an older release without the wheel the newest has (wheelgap says `wheel`, the install builds or fails), or the reverse. Pin the versions you install to check exactly those.
 - **Tracking:** Backtracking is by design; documented in [How it works](how-it-works.md#version-ranges). uv's rule for picking a release for one range also differs from pip's (it ignores a `Requires-Python` upper bound, for example), which is why `--dockerfile-inputs` refuses an unpinned requirement under `uv pip install`; reading those ranges the way uv does is [#643](https://github.com/wheelgap/wheelgap/issues/643).
 
 ## Python patch releases
 
-- **What wheelgap assumes:** Passing `-p 3.13` evaluates `Requires-Python` metadata assuming the newest patch level of that Python series (`3.13.99`).
+- **What wheelgap assumes:** Passing `-p 3.13` evaluates `Requires-Python` metadata assuming the newest patch level of that Python series (`3.13.99`). `--dockerfile` does the same for an image pinned to a patch release: `FROM python:3.9.1-slim` is checked as 3.9.
 - **What pip and uv do:** Installers compare `Requires-Python` against the exact runtime Python version in the active environment (e.g., `3.13.0` or `3.13.2`).
-- **When it changes the answer:** A package requiring `Requires-Python: >=3.13.2` is accepted by wheelgap for `-p 3.13`, but an installation running on Python `3.13.0` or `3.13.1` refuses it.
+- **When it changes the answer:** A package requiring `Requires-Python: >=3.13.2` is accepted by wheelgap for `-p 3.13`, but an installation running on Python `3.13.0` or `3.13.1` refuses it. In an image pinned to an early patch release it's the same: cryptography 44.0.0 has `Requires-Python: !=3.9.0,!=3.9.1,>=3.7`, so pip in `python:3.9.1-slim` refuses it, while wheelgap counts it for 3.9.
 - **Tracking:** Tracked in [#638](https://github.com/wheelgap/wheelgap/issues/638).
 
 ## Pre-installed packages
@@ -54,7 +54,7 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 
 ## User and system configuration
 
-- **What wheelgap assumes:** User and system configuration files (`pip.conf` or `pip.ini`, `~/.config/uv/uv.toml`, `/etc/uv/uv.toml`) are not read, and `PIP_*` and `UV_*` environment variables never change which files are checked. Some of those variables are read only to refuse or skip a feature whose answer they would make wrong, such as `--deps` under `PIP_INDEX_URL`, and to decide which package names may be sent to PyPI (see [Which package names leave the run](how-it-works.md#pypi-origin)).
+- **What wheelgap assumes:** User and system configuration files (`pip.conf` or `pip.ini`, `~/.config/uv/uv.toml`, `/etc/uv/uv.toml`) are not read, and `PIP_*` and `UV_*` environment variables never change which files are checked. Some of those variables are read only to refuse or skip a feature whose answer they would make wrong, such as `--deps` under `PIP_INDEX_URL`, to say they're set (`UV_EXCLUDE_NEWER` for a `pyproject.toml` or script), and to decide which package names may be sent to PyPI (see [Which package names leave the run](how-it-works.md#pypi-origin)).
 - **What pip and uv do:** Installers load configuration from user and system configuration paths and respect environment variables that set index URLs and other options.
 - **When it changes the answer:** If the installing machine's configuration points pip or uv at another index or changes how files are picked, wheelgap's answer is still PyPI's (or that of the `--index-url` passed to wheelgap).
 - **Tracking:** Documented in [Which package names leave the run](how-it-works.md#pypi-origin).
@@ -68,10 +68,10 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 
 ## File-name casing
 
-- **What wheelgap assumes:** A file a requirements file names with `-r` or `-c` is found as the host's file system finds it. `--dockerfile-inputs` matches `COPY` paths with exact case on every host (after 0.13.0).
+- **What wheelgap assumes:** A file a requirements file names with `-r` or `-c` is found as the host's file system finds it. `--dockerfile-inputs` matches `COPY` paths, and the `-r` and `-c` files the copied files name, with exact case on every host (after 0.13.0).
 - **What pip and uv do:** On a case-sensitive file system (such as Linux, and a Linux Docker build), a name that differs only in case (`Base.txt` vs `base.txt`) is not found.
 - **When it changes the answer:** Running `wheelgap requirements.txt` on macOS or Windows can follow `-r Base.txt` to `base.txt`, where pip on Linux stops with an error.
-- **Tracking:** Listed as a later step in [#635](https://github.com/wheelgap/wheelgap/issues/635), which fixed the Dockerfile case.
+- **Tracking:** Not tracked yet; [#635](https://github.com/wheelgap/wheelgap/issues/635) fixed the `--dockerfile-inputs` case.
 
 ## Source builds
 
