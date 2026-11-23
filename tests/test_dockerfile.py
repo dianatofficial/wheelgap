@@ -1684,13 +1684,16 @@ def test_cli_dockerfile_inputs_includes_leave_out_a_constraints_files_own_includ
         "--compile",
         "--progress-bar off",
         "--progress-bar=off",
+        "--progress-bar raw",
         "--no-warn-script-location",
         "--no-color",
         "--break-system-packages",
         "--retries 5",
         "--retries=5",
+        "--retries 0",
         "--timeout 60",
         "--timeout=60",
+        "--timeout 7.5",
         "--default-timeout 100",
         "--default-timeout=100",
         "--no-deps",
@@ -1755,6 +1758,14 @@ def test_dockerfile_requirements_pip_install_flags(tmp_path, flags):
         "--timeout=",
         "--default-timeout",
         "--default-timeout=",
+        # A value pip doesn't take: pip exits (cli/cmdoptions.py, pip 26.3), and a requirement isn't taken for one.
+        "--progress-bar pretty",
+        "--progress-bar=ascii",
+        "--retries x",
+        "--retries=-1",
+        "--timeout six",
+        "--default-timeout=never",
+        "--root-user-action -U",
     ],
 )
 def test_dockerfile_requirements_refuses_install_flags_that_can_change_resolution(tmp_path, setting):
@@ -2359,6 +2370,15 @@ def test_dockerfile_requirements_refuses_uv_only_flags_on_a_pip_line(tmp_path, f
     assert dockerfile_requirements(path, uv_installs=set()) == [(4, tmp_path / "requirements.txt")]
 
 
+@pytest.mark.parametrize("flags", ["--link-mode bogus", "--link-mode=bogus", "--link-mode Copy", "--link-mode"])
+def test_dockerfile_requirements_refuses_a_link_mode_uv_does_not_take(tmp_path, flags):
+    # uv exits on a --link-mode other than clone, copy, hardlink or symlink (`uv pip install --help`, uv 0.13.1),
+    # and the word after the flag is never taken for a requirement.
+    path = _context(tmp_path, _UV_RUN.format("requirements.txt", f"{flags} -r requirements.txt"))
+    with pytest.raises(DockerfileError, match=rf":4: uv pip install {re.escape(flags.split()[0])}: "):
+        dockerfile_requirements(path, uv_installs=set())
+
+
 def test_dockerfile_requirements_no_deps_read_without_deps_refused_with_deps(tmp_path):
     # pip: read without --deps
     path_pip = _context(
@@ -2366,7 +2386,7 @@ def test_dockerfile_requirements_no_deps_read_without_deps_refused_with_deps(tmp
     )
     assert dockerfile_requirements(path_pip) == [(4, tmp_path / "pip" / "requirements.txt")]
     # pip: refused with --deps
-    with pytest.raises(DockerfileError, match=r":4: pip install --no-deps and wheelgap's --deps contradict each other"):
+    with pytest.raises(DockerfileError, match=r":4: pip install --no-deps installs no dependencies, .*: drop --deps"):
         dockerfile_requirements(path_pip, dependencies=True)
 
     # uv: read without --deps
@@ -2374,7 +2394,7 @@ def test_dockerfile_requirements_no_deps_read_without_deps_refused_with_deps(tmp
     assert dockerfile_requirements(path_uv, uv_installs=set()) == [(4, tmp_path / "uv" / "requirements.txt")]
     # uv: refused with --deps
     with pytest.raises(
-        DockerfileError, match=r":4: uv pip install --no-deps and wheelgap's --deps contradict each other"
+        DockerfileError, match=r":4: uv pip install --no-deps installs no dependencies, .*: drop --deps"
     ):
         dockerfile_requirements(path_uv, dependencies=True, uv_installs=set())
 
@@ -3180,6 +3200,8 @@ _INSTALL = "RUN pip install -r requirements.txt\n"
         ),
         ("RUN set -eux; python -m pip install --no-cache-dir -r requirements.txt; pip check\n", {"shell": [4]}),
         ("RUN pip --no-cache-dir install -r requirements.txt > /dev/null 2>&1\n", {}),
+        ("RUN pip -q --no-color install -r requirements.txt\n", {}),
+        ("RUN uv pip --no-progress install --system -r requirements.txt\n", {}),
         ("RUN /usr/local/bin/pip install -r /app/requirements.txt\n", {}),
         ("RUN cd / && pip install -r app/requirements.txt\n", {"shell": [4]}),
         ("RUN python -m venv /opt/venv && /opt/venv/bin/pip install -r requirements.txt\n", {"venv": [4]}),
@@ -3192,6 +3214,13 @@ _INSTALL = "RUN pip install -r requirements.txt\n"
             "RUN python -m pip install -U 'pip>=24' wheel && python -m ensurepip\n" + _INSTALL,
             {"installer-tools": [4]},
         ),
+        # A flag's value isn't a requirement name.
+        ("RUN pip install --progress-bar off --retries 3 -U pip\n" + _INSTALL, {"installer-tools": [4]}),
+        (
+            "RUN pip install --root-user-action ignore --timeout 60 -U pip setuptools\n" + _INSTALL,
+            {"installer-tools": [4]},
+        ),
+        ("RUN uv pip install --system --link-mode copy -U pip\n" + _INSTALL, {"installer-tools": [4]}),
     ],
 )
 def test_dockerfile_requirements_passes_over_runs_that_install_nothing(tmp_path, body, classes):
@@ -3674,6 +3703,14 @@ _ANOTHER_INDEX = (
         ("pip install -c requirements.txt six", ":4: pip install -c FILE with requirements on the command line"),
         ("pip install --prefer-binary six", ":4: pip install --prefer-binary makes .* on the line is pinned"),
         ("pip install --no-cache-dir", ":4: pip install names nothing to install"),
+        # A flag's value pip doesn't take isn't read, and the word after it isn't the flag's value (pip exits).
+        ("pip install --timeout six", ":4: pip install --timeout: --dockerfile-inputs only reads"),
+        ("pip install --progress-bar six", ":4: pip install --progress-bar: --dockerfile-inputs only reads"),
+        ("uv pip install --system --link-mode six==1.16.0", ":4: uv pip install --link-mode: .* for uv"),
+        # Only general options come before the subcommand: pip and uv exit on an install option there.
+        ("pip --compile install six", ":4: `pip --compile install six`: only `install` is read of pip's"),
+        ("pip -U install six", ":4: `pip -U install six`: only `install` is read of pip's"),
+        ("uv pip --strict install --system six==1.16.0", ":4: .*only `install` is read of uv pip"),
         ("pip install six || true", ":4: `pip install six` is in a list with \\|\\|"),
         # uv picks its own version for a range, so under uv a name must be pinned.
         ("uv pip install --system six", ":4: uv pip install: six isn't pinned with ==, and uv and pip can pick"),
