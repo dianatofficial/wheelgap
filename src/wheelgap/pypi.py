@@ -925,9 +925,14 @@ def _supports_python(entry: dict, python: str | None, key: str = "requires_pytho
 
 
 def _newest_matching(
-    data: dict, spec: str, python: str | None = None, exclude_newer: datetime | None = None
+    data: dict,
+    spec: str,
+    python: str | None = None,
+    exclude_newer: datetime | None = None,
+    hashes: frozenset[str] = frozenset(),
 ) -> tuple[str, list[dict]] | None:
-    """The newest matching release with non-yanked files supporting `python`, when supplied."""
+    """The newest matching release with non-yanked files supporting `python`, when supplied. With a requirement's
+    `hashes`, the newest such release that has a file with a listed sha256, if any release has one."""
     releases = data.get("releases")
     if not isinstance(releases, dict):
         # A mirror without the (deprecated) release list: fall back to the latest, if it matches.
@@ -955,6 +960,11 @@ def _newest_matching(
         live = [e for e in before_cutoff(files, exclude_newer) if not e.get("yanked") and _supports_python(e, python)]
         if live:
             usable[version] = (text, live)
+    if hashes and any(_sha256(e) in hashes for _, live in usable.values() for e in live):
+        # pip filters the files of every release the range allows by --hash before it picks one, and ranks a file
+        # with a listed hash first (filter_unallowed_hashes and _sort_key in pip/_internal/index/package_finder.py):
+        # pip 26.3 installs demo 1.0 for `demo>=0.5 --hash=sha256:<1.0's wheel>` with demo 2.0 on the index.
+        usable = {v: (t, live) for v, (t, live) in usable.items() if any(_sha256(e) in hashes for e in live)}
     chosen = max(constraint.filter(usable), default=None)
     return usable[chosen] if chosen is not None else None
 
@@ -1143,9 +1153,9 @@ def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> 
                 pkg.project_urls = {"Homepage": info["home_page"]}
             if isinstance(info.get("home_page"), str):
                 pkg.home_page = info["home_page"]
-        if not pinned and (pkg.spec or pkg.exclude_newer):
+        if not pinned and (pkg.spec or pkg.exclude_newer or pkg.hashes):
             # A range (numpy>=1.26,<2): check the release an installer would pick, not the latest.
-            found = _newest_matching(data, pkg.spec or "", python, pkg.exclude_newer)
+            found = _newest_matching(data, pkg.spec or "", python, pkg.exclude_newer, pkg.hashes)
             if found is None:
                 pkg.error = (
                     (f"no release matches {pkg.spec}" if pkg.spec else "no release")

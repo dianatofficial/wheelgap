@@ -1011,3 +1011,17 @@ def test_requirement_hashes_ask_again_when_the_cached_files_have_no_digests(fake
     ]
     again = Package("hashpkg", "1.0", hashes=frozenset({"3" * 64}))
     assert pypi.fill(again, read_cache=True).files == ["hashpkg-1.0.tar.gz"] and len(fake_pypi) == 1
+
+
+def test_requirement_hashes_pick_the_release_of_a_range_as_pip_does(fake_pypi, monkeypatch):
+    # pip filters every release a range allows by --hash before it picks one: pip 26.3 installs demo 1.0 for
+    # `demo>=0.5 --hash=sha256:<1.0's file>` with demo 2.0 on the index. A bare name is read the same way.
+    monkeypatch.setitem(
+        FAKE_INDEX["hashpkg"], "2.0", [{"filename": "hashpkg-2.0-py3-none-any.whl", "digests": {"sha256": "4" * 64}}]
+    )
+    for spec in (">=0.5", None):
+        pkg = pypi.fill(Package("hashpkg", None, spec=spec, origin="requirements.txt", hashes=frozenset({"3" * 64})))
+        assert (pkg.version, pkg.files, pkg.error) == ("1.0", ["hashpkg-1.0.tar.gz"], None)
+    # No release has a listed file: pip downloads its pick of the newest and refuses its hash.
+    pkg = pypi.fill(Package("hashpkg", None, spec=">=0.5", origin="requirements.txt", hashes=frozenset({"9" * 64})))
+    assert pkg.error == "none of the hashes in requirements.txt matches a file of hashpkg 2.0"
