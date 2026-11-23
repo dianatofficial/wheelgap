@@ -23,7 +23,6 @@ from packaging.utils import (
     InvalidSdistFilename,
     InvalidWheelFilename,
     canonicalize_name,
-    canonicalize_version,
     parse_sdist_filename,
     parse_wheel_filename,
 )
@@ -2167,18 +2166,66 @@ def _apply_format_options(line: str, format_control: _FormatControl) -> bool:
     return True
 
 
-def _exact_pins(entries: list[Package]) -> dict[str, str]:
-    """The constraints' exact versions: 1.9 and 1.9.0 are one version, and reversed() keeps the first spelling."""
-    return {canonicalize_version(e.version): e.version for e in reversed(entries) if e.version}
+def _pin_specifier(version: str) -> str:
+    """The specifier of an exact pin: `==`, or `===` for a version PEP 440 can't read (which only `===` can pin)."""
+    try:
+        Version(version)
+    except InvalidVersion:
+        return f"==={version}"
+    return f"=={version}"
+
+
+def _specifier(entry: Package) -> str | None:
+    """What a requirement or constraint asks of the version, or None for a bare name, which asks nothing."""
+    return _pin_specifier(entry.version) if entry.version else entry.spec
+
+
+def _allows(version: str, specifiers: list[str]) -> bool:
+    """Whether pip takes `version` under all these specifiers at once, as it combines a requirement's with its
+    constraints': a pre-release counts (a pin names it), and `==1.0` takes `1.0+cpu`, as PEP 440's matching does."""
+    return all(SpecifierSet(specifier).contains(version, prereleases=True) for specifier in specifiers)
 
 
 def _constraint_error(entries: list[Package]) -> str | None:
     """Why these constraints on one package can't be applied as an index version or range, if they can't."""
     if any(entry.skip for entry in entries):
         return "constraint isn't an index version or range"
-    if len(_exact_pins(entries)) > 1:
+    # 1.9 and 1.9.0 are one version, and 1.0 with 1.0+cpu is 1.0+cpu (pip installs it): pins conflict only when no
+    # one of them matches them all.
+    pins = [entry.version for entry in entries if entry.version]
+    if pins and not any(_allows(pin, [_pin_specifier(other) for other in pins]) for pin in pins):
         return "constraints specify conflicting exact versions"
     return None
+
+
+def _constraint_conflict(pkg: Package, entries: list[Package]) -> str | None:
+    """Apply a requirement's unmarked constraints to it as pip does, or say why pip refuses them. A pin keeps its
+    version, or takes a constraint's local version that matches it (`==1.0` with `==1.0+cpu`); an exact constraint
+    becomes the version of an unpinned or ranged requirement; ranges are intersected, and a range that no release
+    matches is reported when the index is asked."""
+    specifiers = [specifier for entry in entries if (specifier := _specifier(entry))]
+    pins = [entry.version for entry in entries if entry.version]
+    own = _specifier(pkg)
+    if not pkg.version and not pins:
+        spec = SpecifierSet(pkg.spec or "")
+        for specifier in specifiers:
+            spec &= SpecifierSet(specifier)
+        pkg.spec = str(spec) or None
+        return None
+    candidates = ([pkg.version] if pkg.version else []) + pins
+    chosen = next((v for v in candidates if _allows(v, specifiers + ([own] if own else []))), None)
+    if chosen is not None:
+        pkg.version, pkg.spec = chosen, None
+        return None
+    # Name a constraint that the requirement's pin, or else the constraints' pin, falls outside.
+    shown = pkg.version or pins[0]
+    if own and not pkg.version and not _allows(shown, [own]):
+        blamed = next(entry for entry in entries if entry.version)
+        return f"requirement {pkg.name}{own} conflicts with the constraint {blamed.name}{_specifier(blamed)}"
+    rejecting = [entry for entry in entries if (s := _specifier(entry)) and not _allows(shown, [s])]
+    blamed = next((entry for entry in rejecting if not entry.version), rejecting[0])
+    first = f"requirement {pkg.name}{own}" if pkg.version else f"the constraint {pkg.name}=={shown}"
+    return f"{first} conflicts with the constraint {blamed.name}{_specifier(blamed)}"
 
 
 def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> Source:
@@ -2247,43 +2294,18 @@ def _finalize_requirements(
         unmarked = [entry for entry in entries if not entry.markers]
         if unmarked_error := _constraint_error(unmarked):
             constraint_errors[pkg.key] = unmarked_error
-        if any(entry.markers for entry in entries):
+        # A marked constraint that a pinned requirement already meets changes nothing, true or false; any other
+        # depends on the target.
+        if any(
+            entry.markers
+            and not (pkg.version and ((specifier := _specifier(entry)) is None or _allows(pkg.version, [specifier])))
+            for entry in entries
+        ):
             pkg.error = "constraint has an environment marker; target-dependent constraints aren't supported"
         elif unmarked_error:
             pkg.error = unmarked_error
-        elif pkg.version:
-            for entry in unmarked:
-                if entry.version and canonicalize_version(entry.version) != canonicalize_version(pkg.version):
-                    pkg.error = (
-                        f"requirement {pkg.name}=={pkg.version} conflicts with "
-                        f"the constraint {entry.name}=={entry.version} (pip refuses this)"
-                    )
-                    break
-                elif entry.spec and not SpecifierSet(entry.spec).contains(pkg.version, prereleases=True):
-                    pkg.error = (
-                        f"requirement {pkg.name}=={pkg.version} conflicts with "
-                        f"the constraint {entry.name}{entry.spec} (pip refuses this)"
-                    )
-                    break
-        elif pins := _exact_pins(unmarked):
-            pin_version = next(iter(pins.values()))
-            if pkg.spec and not SpecifierSet(pkg.spec).contains(pin_version, prereleases=True):
-                entry = next(
-                    e
-                    for e in unmarked
-                    if e.version and canonicalize_version(e.version) == canonicalize_version(pin_version)
-                )
-                pkg.error = (
-                    f"requirement {pkg.name}{pkg.spec} conflicts with "
-                    f"the constraint {entry.name}=={pin_version} (pip refuses this)"
-                )
-            else:
-                pkg.version, pkg.spec = pin_version, None
-        else:
-            spec = SpecifierSet(pkg.spec or "")
-            for entry in unmarked:
-                spec &= SpecifierSet(entry.spec or "")
-            pkg.spec = str(spec) or None
+        elif conflict := _constraint_conflict(pkg, unmarked):
+            pkg.error = f"{conflict} (pip refuses this)"
     # A constraint on a package the file doesn't require only ever counts as a transitive dep's specifier,
     # which --deps sees; a constraint the file already called out as broken is left to constraint_errors.
     deps_blockers: list[str] = []

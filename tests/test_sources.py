@@ -290,6 +290,60 @@ def test_requirements_nested_constraints_combine_ranges_and_keep_pins(tmp_path):
             None,
             None,
         ),
+        # pip 26.3 checked: ==1.0 matches 1.0+local (PEP 440), so pip installs 1.0+local whichever side names it.
+        ("demo==1.0+local", "demo==1.0", "1.0+local", None, None),
+        ("demo==1.0", "demo==1.0+local", "1.0+local", None, None),
+        (
+            "demo==1.0+local",
+            "demo==1.0+cpu",
+            "1.0+local",
+            None,
+            "requirement demo==1.0+local conflicts with the constraint demo==1.0+cpu (pip refuses this)",
+        ),
+        (
+            "demo==1.0+cpu",
+            "demo!=1.0",
+            "1.0+cpu",
+            None,
+            "requirement demo==1.0+cpu conflicts with the constraint demo!=1.0 (pip refuses this)",
+        ),
+        ("demo==1.0+cpu", "demo==1.0\ndemo==1.0+cpu", "1.0+cpu", None, None),
+        ("demo", "demo==1.0\ndemo==1.0+cpu", "1.0+cpu", None, None),
+        # A pinned pre-release counts, as pip takes it; <2.0 leaves out 2.0's pre-releases.
+        ("demo==2.0b1", "demo>=1.0", "2.0b1", None, None),
+        ("demo>=1.0", "demo==2.0b1", "2.0b1", None, None),
+        (
+            "demo==2.0b1",
+            "demo<2.0",
+            "2.0b1",
+            None,
+            "requirement demo==2.0b1 conflicts with the constraint demo<2.0 (pip refuses this)",
+        ),
+        (
+            "demo==1!1.0",
+            "demo==1.0",
+            "1!1.0",
+            None,
+            "requirement demo==1!1.0 conflicts with the constraint demo==1.0 (pip refuses this)",
+        ),
+        ("demo==3.6", "demo", "3.6", None, None),
+        # An exact constraint must meet the other constraints too.
+        (
+            "demo>=1",
+            "demo==2.0\ndemo<1.5",
+            None,
+            ">=1",
+            "the constraint demo==2.0 conflicts with the constraint demo<1.5 (pip refuses this)",
+        ),
+        # A marked constraint that the pin meets changes nothing on any target; one it doesn't depends on the target.
+        ("idna==3.6", 'idna==3.6; sys_platform == "win32"', "3.6", None, None),
+        (
+            "idna==3.6",
+            'idna==3.7; sys_platform == "win32"',
+            "3.6",
+            None,
+            "constraint has an environment marker; target-dependent constraints aren't supported",
+        ),
     ],
 )
 def test_requirements_constraint_conflict_and_agreement(
