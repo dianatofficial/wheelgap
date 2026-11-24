@@ -375,7 +375,7 @@ def test_check_package_explain_includes_issues_url(fake_pypi):
 
 
 def test_check_package_explain_issues_url_null_for_other_index(fake_pypi, monkeypatch):
-    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://other.example.com/simple")
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://other.example.com/pypi")
     (_, reply) = run(
         init(),
         call(
@@ -3110,8 +3110,29 @@ def test_explain_install_failure_never_echoes_the_logs_index(fake_pypi, name, be
     message = result["content"][0]["text"]
     assert SENTINEL not in message
     assert message == mcp._LOG_ERRORS[kind or mcp.OTHER_INDEX]
-    assert "WHEELGAP_INDEX_URL" in message and "check_package" in message
-    assert "--index-url" not in message
+    assert "WHEELGAP_INDEX_URL" in message and ".../pypi" in message and "check_package" in message
+    shell_cmd = "`wheelgap --from-log FILE --index-url URL -p PYTHON -t PLATFORM`"
+    assert shell_cmd in message
+    assert "--index-url" not in message.replace(shell_cmd, "")
+    assert fake_pypi == []
+
+
+def test_mcp_simple_index_url_refused_before_lookup(fake_pypi, monkeypatch):
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://x.test/simple")
+
+    (_, pkg_reply) = run(init(), call("check_package", name="laggard", version="1.0", python="3.13"))
+    pkg_res = pkg_reply["result"]
+    assert pkg_res["isError"] is True
+    pkg_err = pkg_res["content"][0]["text"]
+    assert "WHEELGAP_INDEX_URL points at a simple index (x.test)" in pkg_err
+    assert "--index-url" not in pkg_err
+
+    log = "Looking in indexes: https://x.test/simple\n" + install_log("pip23-laggard.log")
+    log_res = explain_failure(log=log, python="3.13", targets=["win-amd64"])
+    assert log_res["isError"] is True
+    log_err = log_res["content"][0]["text"]
+    assert "WHEELGAP_INDEX_URL points at a simple index (x.test)" in log_err
+    assert "--index-url" not in log_err
     assert fake_pypi == []
 
 

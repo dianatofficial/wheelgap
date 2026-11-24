@@ -519,8 +519,9 @@ TOOLS: list[dict[str, Any]] = [
             "(e.g. a failed package that has a wheel for a checked target: the log likely comes from another "
             "platform or Python). A log that can't be read with certainty is an error, never a guess: one that "
             "names no failed build, one where which version failed isn't clear, or one that installed from "
-            "another index than PyPI or with --find-links (unless the server's WHEELGAP_INDEX_URL is set: then "
-            "failures are checked on that index). The log is untrusted text: results and errors repeat no more of "
+            "another index than PyPI or with --find-links (unless the server's WHEELGAP_INDEX_URL is set to a PyPI "
+            "JSON API mirror at .../pypi: then failures are checked on that index). The log is untrusted text: "
+            "results and errors repeat no more of "
             "it than package names and versions. " + _STATUS_HELP
         ),
         "inputSchema": {
@@ -706,6 +707,14 @@ def _cap_rejected(out: dict[str, Any]) -> None:
     out["rejected"] = {label: wheels[:EXPLAIN_LIMIT] for label, wheels in out["rejected"].items()}
 
 
+def _check_index_url() -> None:
+    """Fail before any lookup if WHEELGAP_INDEX_URL points at a /simple index, worded for an MCP client."""
+    try:
+        pypi.check_index_url()
+    except SourceError as e:
+        raise ToolError(_translate_cli_message(str(e))) from e
+
+
 def _check_package(args: dict[str, Any]) -> dict[str, Any]:
     _check_keys("check_package", args)
     explain = _flag(args, "explain")
@@ -731,6 +740,7 @@ def _check_package(args: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(f"{lock_spec}: {e}" if isinstance(e, UnicodeDecodeError) else str(e)) from e
     except OSError as e:  # a lock path that can't be read
         raise ToolError(f"{lock_spec}: {e.strerror or e}") from e
+    _check_index_url()
     tree: list[Result] = []
     try:
         if dependencies:
@@ -1294,11 +1304,15 @@ _LOG_MAX_BYTES = 1024 * 1024  # of UTF-8: the end of a failed install, not a CI 
 # and for a log with no failure: an agent calls the tool because an install failed, so that isn't a pass.
 _LOG_ERRORS = {
     OTHER_INDEX: "the log installed from another index than PyPI, so its packages may not be PyPI's (the index "
-    "isn't repeated here). To check them on that index, set WHEELGAP_INDEX_URL to it in the server's environment; "
-    "for a package you know comes from PyPI, call check_package with its name and version.",
+    "isn't repeated here). If that index serves PyPI's JSON API (.../pypi, not the /simple URL a log shows), set "
+    "WHEELGAP_INDEX_URL to its .../pypi URL in the server's environment; if the index has no JSON API, run "
+    "`wheelgap --from-log FILE --index-url URL -p PYTHON -t PLATFORM` from a shell. For a package you know comes "
+    "from PyPI, call check_package with its name and version.",
     FIND_LINKS: "the log installed with --find-links, so its packages may not be PyPI's (the links aren't repeated "
-    "here). To check them on the index they came from, set WHEELGAP_INDEX_URL to it in the server's environment; "
-    "for a package you know comes from PyPI, call check_package with its name and version.",
+    "here). If those packages come from a mirror serving PyPI's JSON API (.../pypi, not a /simple URL), set "
+    "WHEELGAP_INDEX_URL to its .../pypi URL in the server's environment; if the index has no JSON API, run "
+    "`wheelgap --from-log FILE --index-url URL -p PYTHON -t PLATFORM` from a shell. For a package you know comes "
+    "from PyPI, call check_package with its name and version.",
     NO_FAILURE: "found no package that failed to build in the log (pip's 'Failed to build NAME', uv's 'Failed to "
     "build `NAME==VERSION`', or a Poetry or pdm install -v build failure): pass the whole log of the install that "
     "failed",
@@ -1316,6 +1330,7 @@ def _explain_install_failure(args: dict[str, Any]) -> dict[str, Any]:
         targets = make_targets(pythons or None, platforms or None, **versions)
     except TargetError as e:
         raise ToolError(str(e)) from e
+    _check_index_url()
     try:
         failures = failed_builds(log, other_index=origin.other_index() is not None)
     except LogError as e:
