@@ -531,7 +531,9 @@ def _input_index_url(path: str, label: str) -> None:
     if pyproject is None:
         return
     try:
-        table = tool_table(tomllib.loads(pyproject.read_text(encoding="utf-8-sig")), pyproject).get("wheelgap", {})
+        # Named as typed: a REF:PATH's copy sits in a temporary folder that's gone after the run.
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8-sig"))
+        table = tool_table(data, f"the pyproject.toml beside {label}").get("wheelgap", {})
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise SourceError(
             f"the pyproject.toml beside {label} can't be read, so its index-url isn't known: {e}"

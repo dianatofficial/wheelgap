@@ -720,6 +720,19 @@ def test_diff_refuses_index_url_in_the_ref_copy(fake_pypi, repo, capsys):
     assert capsys.readouterr().err == (f"wheelgap: error: the pyproject.toml beside HEAD:uv.lock {INDEX_URL_REFUSAL}\n")
 
 
+@needs_git
+def test_diff_names_a_ref_copy_whose_tool_isnt_a_table_as_typed(fake_pypi, repo, capsys):
+    (repo / "pyproject.toml").write_text("tool = 1\n", encoding="utf-8")
+    git("add", "pyproject.toml", cwd=repo)
+    git("commit", "-q", "-m", "tool", cwd=repo)
+    (repo / "pyproject.toml").unlink()
+    assert main(["HEAD:uv.lock", "uv.lock", *TARGET]) == 2
+    assert fake_pypi == []
+    assert (
+        capsys.readouterr().err == "wheelgap: error: the pyproject.toml beside HEAD:uv.lock: [tool] must be a table\n"
+    )
+
+
 def test_diff_git_ref_without_git_exits_2(fake_pypi, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", str(tmp_path / "nothing-here"))
