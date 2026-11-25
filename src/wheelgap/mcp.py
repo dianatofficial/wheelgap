@@ -707,12 +707,14 @@ def _cap_rejected(out: dict[str, Any]) -> None:
     out["rejected"] = {label: wheels[:EXPLAIN_LIMIT] for label, wheels in out["rejected"].items()}
 
 
-def _check_index_url() -> None:
-    """Fail before any lookup if WHEELGAP_INDEX_URL points at a /simple index, worded for an MCP client."""
+def _check_index_url(simple_index: str) -> None:
+    """Fail before any lookup if WHEELGAP_INDEX_URL points at a /simple index, as the command line does (#681), with
+    SIMPLE_INDEX as the way to a simple index in place of the command line's --index-url: these tools have no
+    project, so index-url in [tool.wheelgap] (the other tools' way, _CLI_ADVICE) doesn't reach them either."""
     try:
         pypi.check_index_url()
     except SourceError as e:
-        raise ToolError(_translate_cli_message(str(e))) from e
+        raise ToolError(f"{str(e).partition(' To use a simple index')[0]} {simple_index}") from e
 
 
 def _check_package(args: dict[str, Any]) -> dict[str, Any]:
@@ -740,7 +742,7 @@ def _check_package(args: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(f"{lock_spec}: {e}" if isinstance(e, UnicodeDecodeError) else str(e)) from e
     except OSError as e:  # a lock path that can't be read
         raise ToolError(f"{lock_spec}: {e.strerror or e}") from e
-    _check_index_url()
+    _check_index_url("To use a simple index, run `wheelgap NAME==VERSION --index-url URL` from a shell.")
     tree: list[Result] = []
     try:
         if dependencies:
@@ -957,6 +959,11 @@ def _diff_lockfiles(args: dict[str, Any]) -> dict[str, Any]:
         targets = make_targets(_pythons(args) or None, _platforms(args) or None, **_versions(args))
     except TargetError as e:
         raise ToolError(str(e)) from e
+    # As `wheelgap diff`, which has no --index-url either.
+    _check_index_url(
+        "diff_lockfiles can't use a simple index: unset WHEELGAP_INDEX_URL to compare on PyPI, or check each "
+        "lockfile with `wheelgap --index-url URL` from a shell."
+    )
     for path in paths:
         # As `wheelgap diff` (#705), before any lookup: an index-url in [tool.wheelgap] beside either side would be
         # ignored, and PyPI's answer given for a project that installs from that index (#710). The URL isn't named.
@@ -1330,7 +1337,9 @@ def _explain_install_failure(args: dict[str, Any]) -> dict[str, Any]:
         targets = make_targets(pythons or None, platforms or None, **versions)
     except TargetError as e:
         raise ToolError(str(e)) from e
-    _check_index_url()
+    _check_index_url(
+        "To use a simple index, run `wheelgap --from-log FILE --index-url URL -p PYTHON -t PLATFORM` from a shell."
+    )
     try:
         failures = failed_builds(log, other_index=origin.other_index() is not None)
     except LogError as e:

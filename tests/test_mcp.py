@@ -3118,21 +3118,43 @@ def test_explain_install_failure_never_echoes_the_logs_index(fake_pypi, name, be
 
 
 def test_mcp_simple_index_url_refused_before_lookup(fake_pypi, monkeypatch):
+    # #681: the command line refuses a /simple WHEELGAP_INDEX_URL (pypi.check_index_url); these tools answered unknown.
+    # No project reaches them, so the way to a simple index is a shell command, not [tool.wheelgap] index-url.
     monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://x.test/simple")
 
     (_, pkg_reply) = run(init(), call("check_package", name="laggard", version="1.0", python="3.13"))
     pkg_res = pkg_reply["result"]
     assert pkg_res["isError"] is True
     pkg_err = pkg_res["content"][0]["text"]
-    assert "WHEELGAP_INDEX_URL points at a simple index (x.test)" in pkg_err
-    assert "--index-url" not in pkg_err
+    assert pkg_err == (
+        "WHEELGAP_INDEX_URL points at a simple index (x.test); wheelgap needs the JSON API, e.g. https://pypi.org/pypi."
+        " To use a simple index, run `wheelgap NAME==VERSION --index-url URL` from a shell."
+    )
 
     log = "Looking in indexes: https://x.test/simple\n" + install_log("pip23-laggard.log")
     log_res = explain_failure(log=log, python="3.13", targets=["win-amd64"])
     assert log_res["isError"] is True
     log_err = log_res["content"][0]["text"]
-    assert "WHEELGAP_INDEX_URL points at a simple index (x.test)" in log_err
-    assert "--index-url" not in log_err
+    assert log_err == (
+        "WHEELGAP_INDEX_URL points at a simple index (x.test); wheelgap needs the JSON API, e.g. https://pypi.org/pypi."
+        " To use a simple index, run `wheelgap --from-log FILE --index-url URL -p PYTHON -t PLATFORM` from a shell."
+    )
+    assert fake_pypi == []
+
+
+def test_diff_lockfiles_refuses_a_simple_index_url_before_lookup(fake_pypi, tmp_path, monkeypatch):
+    # #681: as `wheelgap diff` does. The tool looked every package up there: each changed one was unknown -> unknown.
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://x.test/simple")
+    old, new = tmp_path / "old.txt", tmp_path / "new.txt"
+    old.write_text("laggard==1.0\n", encoding="utf-8")
+    new.write_text("laggard==1.1\n", encoding="utf-8")
+    (_, reply) = run(init(), call("diff_lockfiles", old=str(old), new=str(new), python="3.13"))
+    result = reply["result"]
+    assert result["isError"] is True
+    message = result["content"][0]["text"]
+    assert message.startswith("WHEELGAP_INDEX_URL points at a simple index (x.test); wheelgap needs the JSON API")
+    assert "unset WHEELGAP_INDEX_URL" in message and "[tool.wheelgap]" not in message
+    assert "--index-url" not in message.replace("`wheelgap --index-url URL`", "")
     assert fake_pypi == []
 
 
