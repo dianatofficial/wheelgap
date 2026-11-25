@@ -58,7 +58,7 @@ from .cli import (
 )
 from .logsafe import guarded_output
 from .pypi import check_index_url
-from .sources import Source, SourceError, file_kind, find_lockfile, parse_uv_lock
+from .sources import Source, SourceError, file_kind, find_lockfile, parse_uv_lock, tool_table
 from .targets import (
     DEFAULT_ANDROID_API,
     DEFAULT_GLIBC,
@@ -531,7 +531,7 @@ def _input_index_url(path: str, label: str) -> None:
     if pyproject is None:
         return
     try:
-        table = tomllib.loads(pyproject.read_text(encoding="utf-8-sig")).get("tool", {}).get("wheelgap", {})
+        table = tool_table(tomllib.loads(pyproject.read_text(encoding="utf-8-sig")), pyproject).get("wheelgap", {})
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise SourceError(
             f"the pyproject.toml beside {label} can't be read, so its index-url isn't known: {e}"

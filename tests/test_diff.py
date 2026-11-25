@@ -1055,3 +1055,15 @@ def test_diff_git_ref_config_when_lockfile_is_absent_from_working_tree(fake_pypi
     assert [(t["python"], t["platform"]) for t in json.loads(capsys.readouterr().out)["targets"]] == [
         ("3.13", "win-arm64")
     ]
+
+
+@pytest.mark.parametrize("side", ["old", "new"])
+def test_diff_pyproject_non_table_tool_exits_with_source_error(capsys, tmp_path, fake_pypi, side):
+    old, new = write_pair(tmp_path, "idna==3.10\n", "idna==3.10\n")
+    (tmp_path / side / "pyproject.toml").write_text("tool = 1\n", encoding="utf-8")
+
+    assert main([old, new, "-p", "3.13", "-t", "linux-x86_64"]) == 2
+    err = capsys.readouterr().err
+    assert "[tool] must be a table" in err
+    assert "AttributeError" not in err
+    assert fake_pypi == []

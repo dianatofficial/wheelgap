@@ -606,6 +606,14 @@ def _refuse_script_build_restrictions(path: Path) -> None:
         )
 
 
+def tool_table(data: dict, path: Path | str) -> dict:
+    """Return the [tool] table from parsed TOML, or raise SourceError when tool is not a table."""
+    tool = data.get("tool", {})
+    if not isinstance(tool, dict):
+        raise SourceError(f"{path}: [tool] must be a table")
+    return tool
+
+
 def _uv_build_restrictions(path: Path, source: Source) -> None:
     """Apply uv's project-level build and wheel restrictions to index packages in a lockfile.
 
@@ -628,9 +636,7 @@ def _uv_build_restrictions(path: Path, source: Source) -> None:
     except tomllib.TOMLDecodeError as exc:
         raise SourceError(f"{config_path}: invalid TOML: {exc}") from None
     setting_table = "uv.toml" if standalone else "[tool.uv]"
-    tool = data.get("tool", {})
-    if not isinstance(tool, dict):
-        raise SourceError(f"{config_path}: [tool] must be a table")
+    tool = tool_table(data, config_path)
     uv = data if standalone else tool.get("uv", {})
     if not isinstance(uv, dict):
         raise SourceError(f"{config_path}: {setting_table} must be a table")
