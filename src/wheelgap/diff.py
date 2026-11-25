@@ -538,8 +538,9 @@ def _input_index_url(path: str, label: str) -> None:
         raise SourceError(
             f"the pyproject.toml beside {label} can't be read, so its index-url isn't known: {e}"
         ) from None
-    if isinstance(table, dict):
-        _refuse_index_url(table, f"the pyproject.toml beside {label}")
+    if not isinstance(table, dict):  # as load_config() says it for the NEW side's file
+        raise SourceError(f"the pyproject.toml beside {label}: [tool.wheelgap] must be a table")
+    _refuse_index_url(table, f"the pyproject.toml beside {label}")
 
 
 def _main(argv: list[str] | None, prog: str) -> int:

@@ -1080,3 +1080,15 @@ def test_diff_pyproject_non_table_tool_exits_with_source_error(capsys, tmp_path,
     assert "[tool] must be a table" in err
     assert "AttributeError" not in err
     assert fake_pypi == []
+
+
+def test_diff_refuses_a_non_table_tool_wheelgap_beside_the_old_side(capsys, tmp_path, fake_pypi):
+    # The NEW side's file goes through load_config(); the OLD side's was read for index-url only and skipped quietly.
+    old, new = write_pair(tmp_path, "idna==3.10\n", "idna==3.10\n")
+    (tmp_path / "old" / "pyproject.toml").write_text("[tool]\nwheelgap = 1\n", encoding="utf-8")
+
+    assert main([old, new, "-p", "3.13", "-t", "linux-x86_64"]) == 2
+    assert capsys.readouterr().err == (
+        f"wheelgap: error: the pyproject.toml beside {old}: [tool.wheelgap] must be a table\n"
+    )
+    assert fake_pypi == []
