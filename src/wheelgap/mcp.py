@@ -709,7 +709,7 @@ def _cap_rejected(out: dict[str, Any]) -> None:
 
 def _check_index_url(simple_index: str) -> None:
     """Fail before any lookup if WHEELGAP_INDEX_URL points at a /simple index, as the command line does (#681), with
-    SIMPLE_INDEX as the way to a simple index in place of the command line's --index-url: these tools have no
+    simple_index as the way to a simple index in place of the command line's --index-url: these tools have no
     project, so index-url in [tool.wheelgap] (the other tools' way, _CLI_ADVICE) doesn't reach them either."""
     try:
         pypi.check_index_url()
