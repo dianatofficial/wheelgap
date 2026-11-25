@@ -547,3 +547,19 @@ def test_mobile_versions_and_errors():
         build_targets(["3.13"], ["ios"], ios="abc")
     with pytest.raises(TargetError, match="iOS 11.0 is too old"):
         build_targets(["3.13"], ["ios"], ios="11.0")
+
+
+def test_libc_versions_require_minor_and_valid_major():
+    from wheelgap.targets import parse_version_pair
+
+    for spec in ("2", "3.1", "1.36"):
+        with pytest.raises(TargetError, match="glibc version"):
+            parse_version_pair(spec, "glibc")
+    for spec in ("1", "2.0"):
+        with pytest.raises(TargetError, match="musl version"):
+            parse_version_pair(spec, "musl")
+    assert parse_version_pair("2.17", "glibc") == (2, 17)
+    assert parse_version_pair("2.36", "glibc") == (2, 36)
+    assert parse_version_pair("1.1", "musl") == (1, 1)
+    assert parse_version_pair("1.2", "musl") == (1, 2)
+    assert parse_version_pair("15", "macOS") == (15, 0)

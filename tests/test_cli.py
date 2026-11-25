@@ -999,6 +999,10 @@ def test_list_targets_rejects_invalid_compatibility_version(capsys):
     assert code == 2 and not out
     assert "can't parse glibc version" in err
 
+    code, out, err = run(capsys, "--list-targets", "--glibc", "2")
+    assert code == 2 and not out
+    assert "glibc version '2' needs a minor version too" in err
+
 
 def test_defaults_from_pyproject(capsys, fixtures):
     code, out, _ = run(capsys, str(fixtures / "configproj"), "--json")
