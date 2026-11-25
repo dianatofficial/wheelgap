@@ -2886,6 +2886,18 @@ def test_diff_lockfiles_refuses_an_index_url_beside_either_lockfile(fake_pypi, t
     assert "sets index-url in [tool.wheelgap], which wheelgap diff doesn't read yet" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("side", ["old", "new"])
+def test_diff_lockfiles_non_table_tool_is_a_tool_error(fake_pypi, tmp_path, side):
+    old, new = lockfile_pair(tmp_path, uv_package("purewheel", "3.1"), uv_package("purewheel", "3.1"))
+    (tmp_path / side / "pyproject.toml").write_text("tool = 1\n", encoding="utf-8")
+    (_, reply) = run(init(), call("diff_lockfiles", old=old, new=new, python="3.13", targets=["linux-x86_64"]))
+    assert reply["result"]["isError"] is True
+    text = reply["result"]["content"][0]["text"]
+    assert "[tool] must be a table" in text
+    assert "AttributeError" not in text
+    assert fake_pypi == []
+
+
 def test_diff_lockfiles_malformed_lockfile_is_a_tool_error(fake_pypi, tmp_path):
     old, new = lockfile_pair(tmp_path, uv_package("purewheel", "3.1"), uv_package("purewheel", "3.1"))
     Path(new).write_text("[[package\n", encoding="utf-8")
