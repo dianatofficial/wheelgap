@@ -2300,8 +2300,20 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     def read_image() -> None:
         """The image of --dockerfile. One wheelgap can't read is an error, unless -p and -t say what to check."""
         nonlocal image, unknown_image
+        path = Path(args.dockerfile)
+        # Not path.exists(): from Python 3.14 it is False for any OSError, and a permission error keeps its own message.
         try:
-            image = read_dockerfile(Path(args.dockerfile), build_args)
+            path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            raise DockerfileError(f"--dockerfile {args.dockerfile}: no such file") from None
+        if path.is_dir():
+            clean = args.dockerfile.rstrip("/\\")
+            example = f"{clean}/Dockerfile" if clean else "/Dockerfile"
+            raise DockerfileError(
+                f"--dockerfile {args.dockerfile}: is a folder; pass the Dockerfile in it, e.g. {example}"
+            )
+        try:
+            image = read_dockerfile(path, build_args)
         except HeredocSyntaxError as e:
             if args.dockerfile_inputs:
                 # -p and -t don't help --dockerfile-inputs here: say what does, with the line.

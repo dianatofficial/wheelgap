@@ -552,12 +552,17 @@ def test_mobile_versions_and_errors():
 def test_libc_versions_require_minor_and_valid_major():
     from wheelgap.targets import parse_version_pair
 
-    for spec in ("2", "3.1", "1.36"):
-        with pytest.raises(TargetError, match="glibc version"):
+    with pytest.raises(TargetError, match=r"glibc version '2' needs a minor version too \(expected e\.g\. 2\.36\)"):
+        parse_version_pair("2", "glibc")
+    for spec in ("3.1", "1.36"):
+        with pytest.raises(TargetError, match=r"doesn't exist: glibc versions are 2\.x"):
             parse_version_pair(spec, "glibc")
-    for spec in ("1", "2.0"):
-        with pytest.raises(TargetError, match="musl version"):
-            parse_version_pair(spec, "musl")
+    with pytest.raises(TargetError, match="musl version '1' needs a minor version too"):
+        parse_version_pair("1", "musl")
+    with pytest.raises(TargetError, match=r"doesn't exist: musl versions are 1\.x"):
+        parse_version_pair("2.0", "musl")
+    with pytest.raises(TargetError, match="glibc version '2' needs a minor version too"):
+        build_targets(["3.13"], ["linux-x86_64"], glibc="2")
     assert parse_version_pair("2.17", "glibc") == (2, 17)
     assert parse_version_pair("2.36", "glibc") == (2, 36)
     assert parse_version_pair("1.1", "musl") == (1, 1)
