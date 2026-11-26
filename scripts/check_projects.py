@@ -3,6 +3,7 @@
     uv run --with pip python scripts/check_projects.py manifest CORPUS_DIR -o manifest.json   # list a corpus's inputs
     uv run --with pip python scripts/check_projects.py run manifest.json -o results/          # check them all
     uv run --with pip python scripts/check_projects.py run manifest.json -o results/ --only owner/name -t win-amd64
+    uv run --with pip python scripts/check_projects.py repo OWNER/NAME [--ref COMMIT] [-t TARGET]  # one public repo
 
 scripts/check_against_pip.py checks one pinned package at a time. This script checks inputs the way projects use
 them: a `uv.lock` with its `pyproject.toml`, or a fully pinned requirements file, read whole, so the markers, forks,
@@ -114,7 +115,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -1626,12 +1630,187 @@ def report(cells: Sequence[Cell], versions: dict[str, str], seconds: float, out=
     return 1 if wrong else 2 if errors else 0
 
 
+def _urllib_fetch(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "wheelgap-check-projects"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                return bytes(resp.read())
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt == 2:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+def _fetch_optional(fetch: Callable[[str], bytes], url: str) -> bytes | None:
+    try:
+        return fetch(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    except FileNotFoundError:
+        return None
+
+
+def resolve_repo_commit(repo: str, ref: str | None = None, fetch: Callable[[str], bytes] = _urllib_fetch) -> str:
+    """Resolve OWNER/NAME (and optional ref) to a full commit SHA via GitHub's API."""
+    parts = repo.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(f"expected OWNER/NAME, got {repo!r}")
+    if ref is None:
+        meta = json.loads(fetch(f"https://api.github.com/repos/{repo}").decode("utf-8"))
+        ref = meta["default_branch"]
+    commit = json.loads(fetch(f"https://api.github.com/repos/{repo}/commits/{ref}").decode("utf-8"))
+    return str(commit["sha"])
+
+
+def fetch_repo_corpus(repo: str, sha: str, corpus_dir: Path, fetch: Callable[[str], bytes] = _urllib_fetch) -> dict:
+    """Download a repo's root lockfiles/pinned requirements into corpus_dir and build its manifest."""
+    folder = corpus_dir / "repos" / repo.replace("/", "__")
+    folder.mkdir(parents=True, exist_ok=True)
+    raw_base = f"https://raw.githubusercontent.com/{repo}/{sha}"
+
+    def save(rel_path: str) -> bytes | None:
+        data = _fetch_optional(fetch, f"{raw_base}/{rel_path}")
+        if data is None:
+            return None
+        dest = folder / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return data
+
+    has_pyproject = False
+    if save("uv.lock") is not None:
+        has_pyproject = save("pyproject.toml") is not None
+        save("uv.toml")
+    if save("poetry.lock") is not None and not has_pyproject:
+        save("pyproject.toml")
+    req_bytes = save("requirements.txt")
+    if req_bytes is not None and fully_pinned(req_bytes.decode("utf-8", errors="replace")):
+        pending = ["requirements.txt"]
+        seen = {"requirements.txt"}
+        while pending:
+            cur = pending.pop(0)
+            text = (folder / cur).read_text(encoding="utf-8", errors="replace")
+            for _, line in requirement_lines(text):
+                match = re.match(r"^(?:-r|--requirement|-c|--constraint)(?:\s*=\s*|\s+|(?=\S))(\S+)$", line)
+                if not match:
+                    continue
+                rel = os.path.normpath(str(Path(cur).parent / match.group(1))).replace("\\", "/")
+                if rel not in seen and not rel.startswith("..") and not Path(rel).is_absolute():
+                    seen.add(rel)
+                    if save(rel) is not None:
+                        pending.append(rel)
+
+    corpus_meta = [{"full_name": repo, "sha": sha}]
+    (corpus_dir / "corpus.json").write_text(json.dumps(corpus_meta, indent=1) + "\n", encoding="utf-8")
+    return make_manifest(corpus_dir)
+
+
+def wheelgap_repro_command(entry: dict, cell: Cell) -> str:
+    py_ver, _, plat = cell.target.partition(" ")
+    cmd = f"uvx wheelgap {entry['main']} -p {py_ver} -t {plat} --explain"
+    if entry["kind"] == "uv.lock" and cell.mode == "default":
+        cmd += "  # default selection (no extras/groups)"
+    return cmd
+
+
+def format_bug_report(repo: str, sha: str, entry: dict, cell: Cell) -> str:
+    """Format a ready-to-paste disagreement report with both reproduction commands."""
+    lines = [
+        f"--- Bug report: {repo} @ {sha} ---",
+        f"Repository: {repo}",
+        f"Commit: {sha}",
+        f"Input: {entry['main']} ({cell.kind}, mode={cell.mode})",
+        f"Target: {cell.target}",
+        f"Package: {cell.package}",
+        f"wheelgap: {cell.wheelgap}",
+        f"{cell.referee}: {cell.answer}" + (f" ({cell.why})" if cell.why else ""),
+        f"wheelgap command: {wheelgap_repro_command(entry, cell)}",
+        f"referee command: {cell.command or '(none)'}",
+    ]
+    return "\n".join(lines)
+
+
+def check_repo(
+    repo: str,
+    *,
+    ref: str | None = None,
+    target_names: Sequence[str] = (),
+    workers: int = 6,
+    own_python: bool = True,
+    fetch: Callable[[str], bytes] = _urllib_fetch,
+    run: Runner = run_command,
+    versions: dict[str, str] | None = None,
+    out: Any = None,
+) -> int:
+    """Fetch one public repo at a commit, compare with referees, and print summary + bug reports."""
+    out = out or sys.stdout
+    targets = pick_targets(target_names)
+    if not targets:
+        raise ValueError(f"no target matches {list(target_names)}")
+    sha = resolve_repo_commit(repo, ref, fetch=fetch)
+    versions = versions or tool_versions()
+    with tempfile.TemporaryDirectory(prefix="wheelgap-repo-") as tmp:
+        tmp_path = Path(tmp)
+        corpus_dir = tmp_path / "corpus"
+        out_dir = tmp_path / "out"
+        corpus_dir.mkdir()
+        out_dir.mkdir()
+        manifest = fetch_repo_corpus(repo, sha, corpus_dir, fetch=fetch)
+        inputs = manifest["inputs"]
+        if not inputs:
+            print(f"No supported uv.lock, poetry.lock, or pinned requirements.txt found in {repo}@{sha}.", file=out)
+            return 2
+        cells: list[Cell] = []
+        entries: dict[tuple[str, str], dict] = {}
+        for entry in inputs:
+            entries[(entry["id"], entry["kind"])] = entry
+            cells += check_input(entry, targets, out_dir, versions, run, workers, own_python)
+        summary = totals(package_cells(cells))
+        print(f"Repo: {repo} @ {sha}", file=out)
+        print(
+            f"Summary: {summary['compared']} compared, {summary['agree']} agreed, "
+            f"{summary['disagree']} disagreed, {summary['not_compared']} not compared.",
+            file=out,
+        )
+        level = target_cells(cells)
+        for cell in level:
+            if cell.verdict != AGREE:
+                print(f"Target-level ({cell.kind}, {cell.mode}, {cell.target}): {cell.verdict}: {cell.why}", file=out)
+        wrong = [c for c in cells if c.verdict == DISAGREE]
+        for cell in wrong:
+            entry = entries[(cell.input, cell.kind)]
+            print("", file=out)
+            print(format_bug_report(repo, sha, entry, cell), file=out)
+        errors = [
+            c
+            for c in level
+            if c.verdict == NOT_COMPARED and ": " in c.why and "refuse" not in c.why and "no referee" not in c.why
+        ]
+        return 1 if wrong else 2 if errors and summary["compared"] == 0 else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[1].split(".")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     make = sub.add_parser("manifest", help="list a corpus folder's inputs in a manifest file")
     make.add_argument("corpus", type=Path)
     make.add_argument("-o", "--output", type=Path, required=True)
+    repo_cmd = sub.add_parser("repo", help="fetch one public GitHub repo and check it against referees")
+    repo_cmd.add_argument("repo", help="OWNER/NAME")
+    repo_cmd.add_argument("--ref", default=None, help="branch, tag, or commit SHA (default: default branch head)")
+    repo_cmd.add_argument("-t", "--target", action="append", default=[], help="only this target: a label or a platform")
+    repo_cmd.add_argument("--workers", type=int, default=6, help="referee runs at once (default 6)")
+    repo_cmd.add_argument(
+        "--no-own-python",
+        action="store_true",
+        help="don't add the newest Python a uv.lock allows when it allows none of the targets' Pythons",
+    )
     check = sub.add_parser("run", help="check the manifest's inputs")
     check.add_argument("manifest", type=Path)
     check.add_argument(
@@ -1659,6 +1838,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not pin.default_cpython():
         parser.error("run it on a default (GIL) build of CPython: uv pip compile takes its tags' ABI from it")
+    if args.command == "repo":
+        try:
+            return check_repo(
+                args.repo,
+                ref=args.ref,
+                target_names=args.target,
+                workers=args.workers,
+                own_python=not args.no_own_python,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     inputs = [
         e

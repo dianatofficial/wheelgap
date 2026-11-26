@@ -955,3 +955,104 @@ def test_flatten_refuses_an_include_outside_the_folder(tmp_path):
     (tmp_path / "input" / "base.txt").write_text("idna==3.10\n", encoding="utf-8")
     (tmp_path / "input" / "requirements.txt").write_text("-r base.txt\nsix==1.16.0\n", encoding="utf-8")
     assert not script.flatten(tmp_path / "input" / "requirements.txt").refuse
+
+
+def test_fetch_repo_corpus_matches_manifest_and_lands_files(tmp_path):
+    sha = "a" * 40
+    pyproject = b'[project]\nname = "demo"\nversion = "0.1.0"\nrequires-python = ">=3.13"\n'
+    files = {
+        "https://api.github.com/repos/org/demo": json.dumps({"default_branch": "main"}).encode(),
+        "https://api.github.com/repos/org/demo/commits/main": json.dumps({"sha": sha}).encode(),
+        f"https://raw.githubusercontent.com/org/demo/{sha}/uv.lock": LOCK.encode("utf-8"),
+        f"https://raw.githubusercontent.com/org/demo/{sha}/pyproject.toml": pyproject,
+        f"https://raw.githubusercontent.com/org/demo/{sha}/requirements.txt": b"-r reqs/base.txt\nsix==1.16.0\n",
+        f"https://raw.githubusercontent.com/org/demo/{sha}/reqs/base.txt": b"idna==3.10\n",
+    }
+
+    def fake_fetch(url: str) -> bytes:
+        if url not in files:
+            raise FileNotFoundError(url)
+        return files[url]
+
+    resolved = script.resolve_repo_commit("org/demo", fetch=fake_fetch)
+    assert resolved == sha
+    corpus_dir = tmp_path / "corpus"
+    got_manifest = script.fetch_repo_corpus("org/demo", resolved, corpus_dir, fetch=fake_fetch)
+    folder = corpus_dir / "repos" / "org__demo"
+    assert (folder / "uv.lock").is_file()
+    assert (folder / "pyproject.toml").is_file()
+    assert (folder / "requirements.txt").is_file()
+    assert (folder / "reqs" / "base.txt").is_file()
+    expected = script.make_manifest(corpus_dir)
+    assert got_manifest == expected
+    assert [e["kind"] for e in got_manifest["inputs"]] == ["uv.lock", "requirements"]
+    assert got_manifest["inputs"][0]["commit"] == sha
+
+
+def test_check_repo_prints_bug_report_on_disagreement():
+    import io
+
+    sha = "b" * 40
+    pyproject = (
+        b'[project]\nname = "demo"\nversion = "0.1.0"\nrequires-python = ">=3.13"\ndependencies = ["winthing"]\n'
+    )
+    uv_lock = b"""\
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "demo"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "winthing" }]
+
+[[package]]
+name = "winthing"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/w/winthing-1.0-py3-none-any.whl" }]
+"""
+    files = {
+        f"https://api.github.com/repos/org/demo/commits/{sha}": json.dumps({"sha": sha}).encode(),
+        f"https://raw.githubusercontent.com/org/demo/{sha}/uv.lock": uv_lock,
+        f"https://raw.githubusercontent.com/org/demo/{sha}/pyproject.toml": pyproject,
+    }
+
+    def fake_fetch(url: str) -> bytes:
+        if url not in files:
+            raise FileNotFoundError(url)
+        return files[url]
+
+    # Fake uv claims winthing==1.0 has no wheel under --no-build (source), disagreeing with wheelgap (wheel).
+    def fake_run(cmd, cwd, env):
+        if cmd[:3] == ["uv", "python", "find"]:
+            return 0, "/usr/bin/python3.13\n"
+        if "--no-build" in cmd and "--no-install-package" not in cmd:
+            return (
+                1,
+                "error: Distribution `winthing==1.0 @ registry+https://pypi.org/simple` "
+                "can't be installed because it is marked as `--no-build` but has no binary distribution\n",
+            )
+        return 0, " + winthing==1.0\n"
+
+    out = io.StringIO()
+    code = script.check_repo(
+        "org/demo",
+        ref=sha,
+        target_names=["3.13 linux-x86_64"],
+        fetch=fake_fetch,
+        run=fake_run,
+        versions={"uv": "0.6.0", "pip": "25.0", "wheelgap": "0.14.0", "wheelgap_commit": "0" * 40},
+        out=out,
+    )
+    text = out.getvalue()
+    assert code == 1
+    assert f"org/demo @ {sha}" in text
+    assert "disagreed" in text
+    assert f"Commit: {sha}" in text
+    assert "Package: winthing==1.0" in text
+    assert "wheelgap: wheel" in text
+    assert "uv sync: source" in text
+    assert "wheelgap command: uvx wheelgap uv.lock" in text
+    assert "referee command: " in text and "uv sync" in text

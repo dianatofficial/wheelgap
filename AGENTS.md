@@ -97,8 +97,12 @@ uv run --group dev pytest
 
 A wrong answer from wheelgap that pip proves wrong is the most useful report there is. You may open a bug report for one yourself, and then fix it.
 
-1. Run wheelgap with `--explain` on a real lockfile, such as a popular open-source project's `uv.lock`, `poetry.lock` or pinned `requirements.txt`, across a few targets: `uvx wheelgap uv.lock -t all -p 3.13 -p 3.14t --explain`.
-2. Check a cell you doubt with pip, which has the last word (for a `uv.lock`, uv has it: see below). pip takes `manylinux` and `musllinux` tags literally, so pass every tag the target accepts, from its glibc or musl version down. For `linux-x86_64` with wheelgap's default glibc (2.36), in bash:
+1. Run the referee check against a public repository in one command:
+   ```bash
+   uv run --with pip python scripts/check_projects.py repo OWNER/NAME [--ref COMMIT] [-t TARGET]
+   ```
+   It fetches the repo's `uv.lock` (with `pyproject.toml`) or pinned `requirements.txt` at that commit, compares `wheelgap` with `uv` / `pip`, and prints a ready-to-paste bug report with both reproduction commands for any disagreement. You can also inspect a lockfile manually with `uvx wheelgap uv.lock -t all -p 3.13 -p 3.14t --explain`.
+2. To double-check a cell directly with pip, which has the last word (for a `uv.lock`, uv has it: see below), pass every tag the target accepts, from its glibc or musl version down. For `linux-x86_64` with wheelgap's default glibc (2.36), in bash:
 
    ```bash
    platforms="$(for m in $(seq 36 -1 5); do printf -- '--platform manylinux_2_%s_x86_64 ' "$m"; done)"
