@@ -1738,6 +1738,33 @@ def format_bug_report(repo: str, sha: str, entry: dict, cell: Cell) -> str:
     return "\n".join(lines)
 
 
+def bug_hunt_marker(repo: str, input_name: str, target: str, package: str) -> str:
+    """Stable HTML comment used to deduplicate bug-hunt issues across runs."""
+    return f"<!-- bug-hunt {repo} {input_name} {target} {package} -->"
+
+
+def build_issue_payload(repo: str, sha: str, entry: dict, cell: Cell) -> dict[str, Any]:
+    """Build a JSON-serializable issue payload for one disagreement cell."""
+    marker = bug_hunt_marker(repo, entry["main"], cell.target, cell.package)
+    body = f"{format_bug_report(repo, sha, entry, cell)}\n\n{marker}\n"
+    return {
+        "marker": marker,
+        "title": f"bug-hunt: {cell.package} on {cell.target} ({repo})"[:200],
+        "body": body,
+        "repo": repo,
+        "commit": sha,
+        "input": entry["main"],
+        "kind": cell.kind,
+        "mode": cell.mode,
+        "target": cell.target,
+        "package": cell.package,
+        "wheelgap": cell.wheelgap,
+        "referee": cell.referee,
+        "answer": cell.answer,
+        "why": cell.why,
+    }
+
+
 def check_repo(
     repo: str,
     *,
@@ -1745,6 +1772,7 @@ def check_repo(
     target_names: Sequence[str] = (),
     workers: int = 6,
     own_python: bool = True,
+    issues_json: Path | None = None,
     fetch: Callable[[str], bytes] = _urllib_fetch,
     run: Runner = run_command,
     versions: dict[str, str] | None = None,
@@ -1767,6 +1795,16 @@ def check_repo(
         inputs = manifest["inputs"]
         if not inputs:
             print(f"No supported uv.lock, poetry.lock, or pinned requirements.txt found in {repo}@{sha}.", file=out)
+            if issues_json is not None:
+                issues_json.parent.mkdir(parents=True, exist_ok=True)
+                issues_json.write_text(
+                    json.dumps(
+                        {"repo": repo, "commit": sha, "summary": totals([]), "disagreements": []},
+                        indent=1,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
             return 2
         cells: list[Cell] = []
         entries: dict[tuple[str, str], dict] = {}
@@ -1789,6 +1827,22 @@ def check_repo(
             entry = entries[(cell.input, cell.kind)]
             print("", file=out)
             print(format_bug_report(repo, sha, entry, cell), file=out)
+        if issues_json is not None:
+            seen_markers: set[str] = set()
+            disagreements: list[dict[str, Any]] = []
+            for cell in wrong:
+                item = build_issue_payload(repo, sha, entries[(cell.input, cell.kind)], cell)
+                if item["marker"] not in seen_markers:
+                    seen_markers.add(item["marker"])
+                    disagreements.append(item)
+            payload = {
+                "repo": repo,
+                "commit": sha,
+                "summary": summary,
+                "disagreements": disagreements,
+            }
+            issues_json.parent.mkdir(parents=True, exist_ok=True)
+            issues_json.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
         errors = [
             c
             for c in level
@@ -1812,6 +1866,12 @@ def main(argv: list[str] | None = None) -> int:
         "--no-own-python",
         action="store_true",
         help="don't add the newest Python a uv.lock allows when it allows none of the targets' Pythons",
+    )
+    repo_cmd.add_argument(
+        "--issues-json",
+        type=Path,
+        default=None,
+        help="write summary and each disagreement's bug report as JSON",
     )
     check = sub.add_parser("run", help="check the manifest's inputs")
     check.add_argument("manifest", type=Path)
@@ -1848,6 +1908,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_names=args.target,
                 workers=args.workers,
                 own_python=not args.no_own_python,
+                issues_json=args.issues_json,
             )
         except ValueError as exc:
             parser.error(str(exc))

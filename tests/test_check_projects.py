@@ -1058,3 +1058,85 @@ wheels = [{ url = "https://files.pythonhosted.org/w/winthing-1.0-py3-none-any.wh
     assert "uv sync: source" in text
     assert "wheelgap command: uvx wheelgap uv.lock" in text
     assert "referee command: " in text and "uv sync" in text
+
+
+def test_check_repo_issues_json_writes_disagreements_and_dedup_marker(tmp_path):
+    import io
+
+    sha = "c" * 40
+    pyproject = (
+        b'[project]\nname = "demo"\nversion = "0.1.0"\nrequires-python = ">=3.13"\n'
+        b'dependencies = ["winthing", "okpkg"]\n'
+    )
+    uv_lock = b"""\
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "demo"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "winthing" }, { name = "okpkg" }]
+
+[[package]]
+name = "winthing"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/w/winthing-1.0-py3-none-any.whl" }]
+
+[[package]]
+name = "okpkg"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/o/okpkg-1.0-py3-none-any.whl" }]
+"""
+    files = {
+        f"https://api.github.com/repos/org/demo/commits/{sha}": json.dumps({"sha": sha}).encode(),
+        f"https://raw.githubusercontent.com/org/demo/{sha}/uv.lock": uv_lock,
+        f"https://raw.githubusercontent.com/org/demo/{sha}/pyproject.toml": pyproject,
+    }
+
+    def fake_fetch(url: str) -> bytes:
+        if url not in files:
+            raise FileNotFoundError(url)
+        return files[url]
+
+    # winthing==1.0 disagrees (wheelgap wheel vs uv source); okpkg==1.0 agrees (both wheel).
+    def fake_run(cmd, cwd, env):
+        if cmd[:3] == ["uv", "python", "find"]:
+            return 0, "/usr/bin/python3.13\n"
+        if "--no-build" in cmd and "--no-install-package" not in cmd:
+            return (
+                1,
+                "error: Distribution `winthing==1.0 @ registry+https://pypi.org/simple` "
+                "can't be installed because it is marked as `--no-build` but has no binary distribution\n",
+            )
+        if "--no-install-package" in cmd:
+            return 0, " + okpkg==1.0\n"
+        return 0, " + okpkg==1.0\n + winthing==1.0\n"
+
+    issues_path = tmp_path / "issues.json"
+    out = io.StringIO()
+    code = script.check_repo(
+        "org/demo",
+        ref=sha,
+        target_names=["3.13 linux-x86_64"],
+        issues_json=issues_path,
+        fetch=fake_fetch,
+        run=fake_run,
+        versions={"uv": "0.6.0", "pip": "25.0", "wheelgap": "0.14.0", "wheelgap_commit": "0" * 40},
+        out=out,
+    )
+    assert code == 1
+    payload = json.loads(issues_path.read_text(encoding="utf-8"))
+    assert payload["summary"]["compared"] == 4
+    assert payload["summary"]["agree"] == 2
+    assert payload["summary"]["disagree"] == 2
+    disagreements = payload["disagreements"]
+    assert len(disagreements) == 1
+    item = disagreements[0]
+    expected_marker = "<!-- bug-hunt org/demo uv.lock 3.13 linux-x86_64 winthing==1.0 @ https://pypi.org/simple -->"
+    assert item["marker"] == expected_marker
+    assert expected_marker in item["body"]
+    assert item["package"] == "winthing==1.0 @ https://pypi.org/simple"

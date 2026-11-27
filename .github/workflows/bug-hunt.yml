@@ -1,0 +1,143 @@
+name: Bug hunt
+
+# Weekly: run scripts/check_projects.py repo over the 20 public repositories in
+# scripts/bug_hunt_repos.txt and file one deduplicated issue per real disagreement (#777).
+
+on:
+  schedule:
+    - cron: "17 8 * * 2" # Tuesdays
+  workflow_dispatch:
+    inputs:
+      file_issues:
+        description: "File GitHub issues for disagreements (keep false on forks)"
+        type: boolean
+        required: false
+        default: false
+      targets:
+        description: "Optional comma-separated target labels (blank uses default targets)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: bug-hunt
+  cancel-in-progress: false
+
+jobs:
+  bug-hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - name: Install Python versions used by default targets
+        run: uv python install 3.13 3.15
+      - name: Check repositories
+        env:
+          INPUT_TARGETS: ${{ inputs.targets }}
+        run: |
+          mkdir -p bug-hunt-results
+          target_args=()
+          if [ -n "$INPUT_TARGETS" ]; then
+            IFS=',' read -ra raw_targets <<< "$INPUT_TARGETS"
+            for t in "${raw_targets[@]}"; do
+              t_trimmed="$(echo "$t" | xargs)"
+              [ -n "$t_trimmed" ] && target_args+=(-t "$t_trimmed")
+            done
+          fi
+          while IFS= read -r repo || [ -n "$repo" ]; do
+            repo="${repo%%#*}"
+            repo="$(echo "$repo" | xargs)"
+            [ -z "$repo" ] && continue
+            safe="${repo//\//__}"
+            echo "::group::$repo"
+            uv run --python 3.14 --no-dev --with pip python scripts/check_projects.py repo "$repo" \
+              "${target_args[@]}" --issues-json "bug-hunt-results/${safe}.json" || true
+            echo "::endgroup::"
+          done < scripts/bug_hunt_repos.txt
+      - name: File deduplicated issues and write job summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SHOULD_FILE: ${{ (github.event_name == 'schedule' && github.repository == 'wheelgap/wheelgap') || inputs.file_issues }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          repo_name = os.environ["GITHUB_REPOSITORY"]
+          should_file = os.environ.get("SHOULD_FILE", "").lower() == "true"
+          files = sorted(Path("bug-hunt-results").glob("*.json"))
+
+          summary_rows = []
+          filed = []
+          skipped_dup = []
+
+          for path in files:
+              data = json.loads(path.read_text(encoding="utf-8"))
+              s = data.get("summary", {})
+              summary_rows.append(
+                  f"| `{data['repo']}` | {s.get('compared', 0)} | {s.get('agree', 0)} | {s.get('disagree', 0)} | {s.get('not_compared', 0)} |"
+              )
+              if not should_file:
+                  continue
+              for item in data.get("disagreements", []):
+                  marker = item["marker"]
+                  search = subprocess.run(
+                      [
+                          "gh", "issue", "list",
+                          "--repo", repo_name,
+                          "--state", "open",
+                          "--search", f'"{marker}" in:body',
+                          "--json", "number",
+                      ],
+                      text=True,
+                      capture_output=True,
+                      check=False,
+                  )
+                  existing = json.loads(search.stdout) if search.returncode == 0 and search.stdout.strip() else []
+                  if existing:
+                      skipped_dup.append(f"{item['repo']} `{item['package']}` (existing #{existing[0]['number']})")
+                      continue
+                  create = subprocess.run(
+                      [
+                          "gh", "issue", "create",
+                          "--repo", repo_name,
+                          "--title", item["title"],
+                          "--body", item["body"],
+                          "--label", "bug",
+                          "--label", "bug-hunt",
+                      ],
+                      text=True,
+                      capture_output=True,
+                      check=False,
+                  )
+                  if create.returncode == 0:
+                      filed.append(f"{item['repo']} `{item['package']}` -> {create.stdout.strip()}")
+
+          lines = [
+              "### Weekly Bug Hunt Summary",
+              "",
+              f"Filing enabled: `{should_file}`",
+              "",
+              "| Repository | Compared | Agreed | Disagreed | Not compared |",
+              "| --- | ---: | ---: | ---: | ---: |",
+              *summary_rows,
+              "",
+          ]
+          if filed:
+              lines += ["#### Issues filed", *[f"- {x}" for x in filed], ""]
+          if skipped_dup:
+              lines += ["#### Existing open issues (deduplicated)", *[f"- {x}" for x in skipped_dup], ""]
+          if not should_file:
+              lines.append("_Issue filing disabled for this run._")
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
