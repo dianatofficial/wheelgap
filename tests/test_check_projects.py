@@ -976,6 +976,8 @@ def test_fetch_repo_corpus_matches_manifest_and_lands_files(tmp_path):
 
     resolved = script.resolve_repo_commit("org/demo", fetch=fake_fetch)
     assert resolved == sha
+    with pytest.raises(ValueError, match="OWNER/NAME"):
+        script.resolve_repo_commit("../bad/repo", fetch=fake_fetch)
     corpus_dir = tmp_path / "corpus"
     got_manifest = script.fetch_repo_corpus("org/demo", resolved, corpus_dir, fetch=fake_fetch)
     folder = corpus_dir / "repos" / "org__demo"

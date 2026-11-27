@@ -1656,11 +1656,13 @@ def _fetch_optional(fetch: Callable[[str], bytes], url: str) -> bytes | None:
         return None
 
 
+_REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
+
+
 def resolve_repo_commit(repo: str, ref: str | None = None, fetch: Callable[[str], bytes] = _urllib_fetch) -> str:
     """Resolve OWNER/NAME (and optional ref) to a full commit SHA via GitHub's API."""
-    parts = repo.split("/")
-    if len(parts) != 2 or not all(parts):
-        raise ValueError(f"expected OWNER/NAME, got {repo!r}")
+    if not _REPO_RE.fullmatch(repo):
+        raise ValueError(f"expected OWNER/NAME matching ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$, got {repo!r}")
     if ref is None:
         meta = json.loads(fetch(f"https://api.github.com/repos/{repo}").decode("utf-8"))
         ref = meta["default_branch"]
