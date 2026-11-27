@@ -41,6 +41,7 @@ jobs:
       - name: Check repositories
         env:
           INPUT_TARGETS: ${{ inputs.targets }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p bug-hunt-results
           target_args=()

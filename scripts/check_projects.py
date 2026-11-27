@@ -1631,7 +1631,12 @@ def report(cells: Sequence[Cell], versions: dict[str, str], seconds: float, out=
 
 
 def _urllib_fetch(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "wheelgap-check-projects"})
+    headers = {"User-Agent": "wheelgap-check-projects"}
+    if url.startswith("https://api.github.com/"):
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token.strip()}"
+    req = urllib.request.Request(url, headers=headers)
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=25) as resp:
