@@ -69,6 +69,7 @@ nav:
       - Targets: targets.md
       - Windows on ARM: windows-arm.md
       - Free-threaded Python: free-threading.md
+      - Rust extensions: rust-extensions.md
       - Python 3.15 readiness: python-3-15-ready.md
       - Configuration: configuration.md
       - Output: output.md
@@ -100,6 +101,7 @@ nav:
       - urllib3: case-studies/urllib3.md
       - dlt: case-studies/dlt.md
       - Home Assistant Core: case-studies/home-assistant.md
+      - OnlineJudge: case-studies/onlinejudge.md
   - Reports:
       - Python 3.15 readiness (Nov 2026): reports/python-3-15.md
   - Integrations:

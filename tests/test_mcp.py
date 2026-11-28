@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import tarfile
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -2845,6 +2846,33 @@ def test_diff_lockfiles_matches_wheelgap_diff_json(fake_pypi, tmp_path, capsys):
         assert data[key] == expected[key]
 
 
+def test_diff_lockfiles_leaves_out_a_python_the_locks_arent_made_for(fake_pypi, tmp_path, capsys):
+    # As `wheelgap diff` (#807): the PyPI side is looked up again for 3.13 and the mirror side can't be, which would
+    # look like a lost wheel; neither lock is made for 3.13, so that target isn't compared.
+    from wheelgap import diff
+
+    mirror = uv_package("fastlib", "2.0.0", tags=("cp314-cp314-manylinux_2_17_x86_64",)).replace(
+        "https://pypi.org/simple", "https://mirrors.example/pypi/simple"
+    )
+    old, new = lockfile_pair(
+        tmp_path, uv_package("fastlib", "2.0.0", tags=("cp314-cp314-manylinux_2_17_x86_64",)), mirror
+    )
+    for path in (old, new):
+        Path(path).write_text(Path(path).read_text(encoding="utf-8").replace(">=3.12", ">=3.14"), encoding="utf-8")
+    assert diff.main([old, new, "-p", "3.13", "-p", "3.14", "-t", "linux-x86_64", "--json"]) == 0
+    expected = json.loads(capsys.readouterr().out)
+    args = {"old": old, "new": new, "python": "3.13,3.14", "targets": ["linux-x86_64"]}
+    (_, reply) = run(init(), call("diff_lockfiles", **args))
+    data = reply["result"]["structuredContent"]
+    assert data["ok"] is True
+    assert data["not_compared"] == expected["not_compared"]
+    assert [e["target"] for e in data["not_compared"]] == ["3.13 linux-x86_64"]
+    (tool,) = [t for t in mcp.TOOLS if t["name"] == "diff_lockfiles"]
+    assert (
+        "when ok is true, check not_compared too, since sides ['new'] means the change dropped" in tool["description"]
+    )
+
+
 def test_diff_lockfiles_identical_files_are_ok(fake_pypi, tmp_path):
     text = uv_package("ranged", "1.9", "sdist") + uv_package("purewheel", "3.1")
     old, new = lockfile_pair(tmp_path, text, text)
@@ -2972,6 +3000,68 @@ def test_explain_install_failure_uv_log(fake_pypi):
     assert (pkg["rejected"], pkg["rejected_omitted"]) == ({"3.13 win-arm64": []}, {})  # an sdist only
     assert (pkg["suggest"], pkg["last_with_wheel"]) == ({}, {})  # no other release
     assert sorted(fake_pypi) == ["https://pypi.org/pypi/nowheels/0.9/json", "https://pypi.org/pypi/nowheels/json"]
+
+
+def test_explain_install_failure_build_packages(fake_pypi, fake_files, tmp_path):
+    # As --fix --build-info (#740): with build_info, each Linux target it builds from source on gets what to install.
+    pyproject = b'[build-system]\nrequires = ["maturin>=1,<2"]\nbuild-backend = "maturin"\n'
+    path = tmp_path / "nowheels-0.9.tar.gz"
+    with tarfile.open(path, "w:gz") as tar:
+        entry = tarfile.TarInfo("nowheels-0.9/pyproject.toml")
+        entry.size = len(pyproject)
+        tar.addfile(entry, io.BytesIO(pyproject))
+    fake_files.files["nowheels-0.9.tar.gz"] = path.read_bytes()
+    targets = ["musl-armv7l", "linux-x86_64", "win-arm64"]
+    plain = explain_failure(log=install_log("uv-ansi.log"), python="3.13", targets=targets)["structuredContent"]
+    (pkg,) = plain["packages"]
+    assert "build_packages" not in pkg and fake_files.calls == []  # opt-in: it downloads the sdist
+    assert not any("build_packages" in note for note in plain["notes"])
+    result = explain_failure(log=install_log("uv-ansi.log"), python="3.13", targets=targets, build_info=True)
+    (pkg,) = result["structuredContent"]["packages"]
+    assert pkg["build_packages"] == {
+        "3.13 musl-armv7l": {
+            "distro": "Alpine",
+            "command": "apk add --no-cache cargo",
+            "packages": ["cargo"],
+            "needs": ["a Rust toolchain"],
+            "distro_python": ["python3-dev"],
+        },
+        "3.13 linux-x86_64": {
+            "distro": "Debian or Ubuntu",
+            "command": "apt-get update && apt-get install -y cargo",
+            "packages": ["cargo"],
+            "needs": ["a Rust toolchain"],
+            "distro_python": ["python3-dev"],
+        },
+    }
+    # The same words as the text and Markdown lines: build tools only, not the libraries it links against.
+    assert (
+        result["structuredContent"]["notes"].count(
+            "build_packages: these are build tools only: libraries the package links against (e.g. libxml2 and libxslt "
+            "for lxml) aren't named"
+        )
+        == 1
+    )
+    assert fake_files.calls == ["https://files.example/nowheels-0.9.tar.gz"]
+    bad = explain_failure(log=install_log("uv-ansi.log"), build_info="yes")
+    assert bad["isError"] is True
+
+
+def test_explain_install_failure_build_packages_says_why_another_index_gives_none(fake_pypi, fake_files, monkeypatch):
+    # A mirror may hold private names whose PyPI namesake is another package: no sdist is read, and a note says so
+    # instead of an empty build_packages with no reason.
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://mirror.example.com/pypi")
+    targets = ["musl-armv7l", "linux-x86_64"]
+    result = explain_failure(log=install_log("uv-ansi.log"), python="3.13", targets=targets, build_info=True)
+    data = result["structuredContent"]
+    (pkg,) = data["packages"]
+    assert pkg["build_packages"] == {} and fake_files.calls == []
+    assert (
+        "build_packages is empty: the server's WHEELGAP_INDEX_URL points to another index than PyPI, where a name may "
+        "be private and its PyPI namesake another package, so no sdist was read from PyPI"
+    ) in data["notes"]
+    without = explain_failure(log=install_log("uv-ansi.log"), python="3.13", targets=targets)["structuredContent"]
+    assert not any("build_packages" in note for note in without["notes"])
 
 
 def test_explain_install_failure_pip_log_with_two_failures(fake_pypi):
@@ -3933,3 +4023,23 @@ def test_tool_result_translates_source_error_reaching_it_directly(monkeypatch):
     text = result["content"][0]["text"]
     assert "--online" not in text
     assert "call again with offline: false" in text
+
+
+def test_diff_lockfiles_leaves_out_a_python_the_new_pdm_lock_targets_drop(fake_pypi, fixtures, tmp_path, capsys):
+    # As `wheelgap diff`: not compared, rather than an error from the check refusing 3.12 on the new lock.
+    from wheelgap import diff
+
+    text = (fixtures / "pdmtargets" / "pdm.lock").read_text(encoding="utf-8")
+    paths = []
+    for side, python in (("old", ">=3.12"), ("new", "==3.13.*")):
+        (tmp_path / side).mkdir()
+        (tmp_path / side / "pdm.lock").write_text(text.replace('"==3.13.*"', f'"{python}"'), encoding="utf-8")
+        paths.append(str(tmp_path / side / "pdm.lock"))
+    assert diff.main([*paths, "-p", "3.12", "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
+    expected = json.loads(capsys.readouterr().out)
+    args = {"old": paths[0], "new": paths[1], "python": "3.12,3.13", "targets": ["linux-x86_64"]}
+    (_, reply) = run(init(), call("diff_lockfiles", **args))
+    data = reply["result"]["structuredContent"]
+    assert reply["result"]["isError"] is False and data["ok"] is True
+    assert data["not_compared"] == expected["not_compared"]
+    assert [(e["target"], e["sides"]) for e in data["not_compared"]] == [("3.12 linux-x86_64", ["new"])]
