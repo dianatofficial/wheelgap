@@ -15,8 +15,13 @@ It runs every week on its own, so it fails closed and stays quiet:
 - a repo that couldn't be checked (an exit code other than 0 or 1, or no JSON file) is an "error" row.
 Each of those, and any issue that couldn't be filed, makes the exit code 1, so the run shows as failed.
 
-Titles and bodies go to `gh` as arguments and a file, never through a shell. The JSON's text comes from scanned
-repositories, so the summary shows it in code spans, and stdout and stderr go through wheelgap.logsafe.
+Titles and bodies go to `gh` as arguments and a file, never through a shell. RESULTS_DIR comes from the job that
+read the scanned repositories, so nothing in it is trusted: a repo must be in scripts/bug_hunt_repos.txt, each
+disagreement's input and target must be ones check_projects.py writes, and the title, body and marker are built
+here again from those fields and the plain-text report (the body only ever shows the report in a ```text fence);
+an item whose marker isn't the one built here is refused. The summary shows that text in code spans, and stdout and
+stderr go through wheelgap.logsafe. Dedup reads an existing issue's marker only from its body's last line, where
+this script puts it, never from the report above it.
 """
 
 from __future__ import annotations
@@ -43,6 +48,48 @@ LABEL_DESCRIPTION = "Found by the weekly bug-hunt workflow"
 LIST_LIMIT = 1000
 MARKER = re.compile(r"<!-- bug-hunt [^\n<>]* -->")
 ISSUE_URL = re.compile(r"https://github\.com/[\w./-]+")
+REPOS_FILE = Path(__file__).with_name("bug_hunt_repos.txt")
+INPUTS = frozenset({"uv.lock", "poetry.lock", "requirements.txt"})
+TARGET = re.compile(r"[0-9]+\.[0-9]+t? [a-z0-9_.-]+")
+MAX_REPORT = 20_000
+# As check_projects.plain: text from a scanned repo in a title or marker can't end the HTML comment, mention someone
+# or add a line.
+_PLAIN = re.compile(r"[^A-Za-z0-9 ._:/=+~!(),-]")
+
+
+def plain(text: str) -> str:
+    return _PLAIN.sub("_", text)
+
+
+def marker_for(repo: str, input_name: str, target: str, package: str) -> str:
+    """As check_projects.bug_hunt_marker: repo, input, target and the package's name (and index), no version."""
+    base, _, source = package.partition(" @ ")
+    name = base.partition("==")[0]
+    what = f"{plain(name)} @ {plain(source)}" if source else plain(name)
+    return f"<!-- bug-hunt {plain(repo)} {plain(input_name)} {plain(target)} {what} -->"
+
+
+def text_fence(text: str) -> str:
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def issue_body(report: str, marker: str) -> str:
+    """As check_projects.build_issue_payload's body: the report only ever in a text fence, the marker last."""
+    return (
+        "Found by the weekly bug hunt (`.github/workflows/bug-hunt.yml`): wheelgap and a referee disagree on this "
+        "package. The report below is `scripts/check_projects.py`'s output. Its package names, versions and "
+        "index URLs come from the scanned repository: check the cell with the two commands before acting on it.\n\n"
+        f"{text_fence(report)}\n\n{marker}\n"
+    )
+
+
+def read_repos(path: Path) -> set[str]:
+    """The repos the bug hunt scans: one OWNER/NAME per line, # comments."""
+    lines = (line.partition("#")[0].strip() for line in path.read_text(encoding="utf-8").splitlines())
+    return {line for line in lines if line}
+
 
 # gh's arguments (without "gh") -> (exit code, stdout, stderr)
 Gh = Callable[[list[str]], tuple[int, str, str]]
@@ -100,35 +147,56 @@ def load(results: Path) -> list[RepoResult]:
     return out
 
 
-def valid_item(item: Any) -> bool:
-    """A disagreement with a well-formed marker, a one-line title and a body that ends with the marker."""
+def rebuild(item: Any, repo: str) -> dict | None:
+    """The issue for one disagreement of `repo`, built here from its checked fields; None if any is off."""
     if not isinstance(item, dict):
-        return False
-    marker, title, body = item.get("marker"), item.get("title"), item.get("body")
-    return (
-        isinstance(marker, str)
-        and MARKER.fullmatch(marker) is not None
-        and isinstance(title, str)
-        and bool(title.strip())
-        and "\n" not in title
-        and "\r" not in title
-        and isinstance(body, str)
-        and body.rstrip().endswith(marker)
-    )
+        return None
+    fields = [item.get(k) for k in ("repo", "input", "target", "package", "report", "marker")]
+    if not all(isinstance(value, str) for value in fields):
+        return None
+    item_repo, input_name, target, package, report, marker = (str(value) for value in fields)
+    name, _, rest = package.partition("==")
+    version = rest.partition(" @ ")[0]
+    if (
+        item_repo != repo
+        or input_name not in INPUTS
+        or not TARGET.fullmatch(target)
+        or not name
+        or not version
+        or len(package) > 500
+        or len(report) > MAX_REPORT
+    ):
+        return None
+    built = marker_for(repo, input_name, target, package)
+    if marker != built or not MARKER.fullmatch(built):
+        return None
+    return {
+        "repo": repo,
+        "input": input_name,
+        "target": target,
+        "package": package,
+        "marker": built,
+        "title": plain(f"bug-hunt: {name}=={version} on {target} ({repo})")[:200],
+        "body": issue_body(report, built),
+    }
 
 
-def pending_items(results: Sequence[RepoResult], problems: list[str]) -> list[dict]:
+def pending_items(results: Sequence[RepoResult], repos: set[str], problems: list[str]) -> list[dict]:
     """Every disagreement to file, once per marker, in the order of the repos."""
     seen: set[str] = set()
     items: list[dict] = []
     for result in results:
         if result.data is None:
             continue
+        if result.repo not in repos:
+            problems.append(f"{code(result.repo)} isn't in {REPOS_FILE.name}: its results weren't used")
+            continue
         found = result.data.get("disagreements", [])
         found_items: list[Any] = found if isinstance(found, list) else [None]  # not a list: malformed
-        for item in found_items:
-            if not valid_item(item):
-                problems.append(f"{result.repo}: a malformed disagreement in its JSON file, not filed")
+        for raw in found_items:
+            item = rebuild(raw, result.repo)
+            if item is None:
+                problems.append(f"{code(result.repo)}: a malformed disagreement in its JSON file, not filed")
                 continue
             if item["marker"] not in seen:
                 seen.add(item["marker"])
@@ -181,7 +249,10 @@ def existing_markers(gh: Gh, repo: str, problems: list[str]) -> set[str] | None:
     if len(issues) >= LIST_LIMIT:
         problems.append(f"{len(issues)} bug-hunt issues: the list may be cut short, so nothing was filed")
         return None
-    return {marker for body in bodies for marker in MARKER.findall(body)}
+    # Only the last line, which this script writes: the fenced report above it is the scanned repo's text, and a
+    # marker in it mustn't mark someone else's bug as filed.
+    last = [next((line.strip() for line in reversed(body.splitlines()) if line.strip()), "") for body in bodies]
+    return {line for line in last if MARKER.fullmatch(line)}
 
 
 def file_issue(gh: Gh, repo: str, item: dict) -> tuple[bool, str]:
@@ -282,8 +353,14 @@ def _main(argv: list[str] | None, gh: Gh, env: Mapping[str, str]) -> int:
     parser.add_argument("results", type=Path, help="the folder with status.tsv and the --issues-json files")
     parser.add_argument("--file", action="store_true", help="file issues (default: only write the summary)")
     parser.add_argument("--max-issues", type=int, default=MAX_ISSUES, help=f"per run (default {MAX_ISSUES})")
+    parser.add_argument("--repos", type=Path, default=REPOS_FILE, help="the repos the bug hunt scans")
     args = parser.parse_args(argv)
     problems: list[str] = []
+    try:
+        repos = read_repos(args.repos)
+    except OSError as exc:
+        repos = set()
+        problems.append(f"no list of repos: {exc.strerror}")
     try:
         results = load(args.results)
     except OSError as exc:
@@ -292,7 +369,7 @@ def _main(argv: list[str] | None, gh: Gh, env: Mapping[str, str]) -> int:
     errors = [r.repo for r in results if r.status == "error"]
     if errors:
         problems.append(f"{len(errors)} repos couldn't be checked: " + ", ".join(code(repo) for repo in errors))
-    items = pending_items(results, problems)
+    items = pending_items(results, repos, problems)
     repo = env.get("GITHUB_REPOSITORY", "")
     if args.file and items and not repo:
         problems.append("GITHUB_REPOSITORY isn't set, so nothing was filed")

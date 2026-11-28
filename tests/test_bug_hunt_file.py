@@ -1,5 +1,6 @@
 """scripts/bug_hunt_file.py with a fake `gh`: dedup (open and closed issues, exact markers), failing closed when the
-label or the listing fails, the per-run cap, and "error" rows for repos that couldn't be checked."""
+label or the listing fails, the per-run cap, "error" rows for repos that couldn't be checked, and an untrusted
+results folder (items are rebuilt from checked fields, markers read only from an issue's last line)."""
 
 import importlib.util
 import json
@@ -22,16 +23,26 @@ def _script():
 script = _script()
 
 
+REPOS = ("o/a", "o/b", "o/ok", "o/crash")
+
+
 def item(repo: str, package: str, target: str = "3.13 linux-x86_64") -> dict:
+    """A disagreement as check_projects.py writes it (its title and body are ignored: the filer builds its own)."""
     marker = f"<!-- bug-hunt {repo} uv.lock {target} {package} @ https://pypi.org/simple -->"
     return {
         "marker": marker,
-        "title": f"bug-hunt: {package}==1.0 on {target} ({repo})",
-        "body": f"```text\nreport for {package}\n```\n\n{marker}\n",
+        "title": "ignored",
+        "body": "ignored",
+        "report": f"report for {package}",
         "repo": repo,
+        "input": "uv.lock",
         "target": target,
         "package": f"{package}==1.0 @ https://pypi.org/simple",
     }
+
+
+def title(it: dict) -> str:
+    return f"bug-hunt: {it['package'].split(' @ ')[0]} on {it['target']} ({it['repo']})"
 
 
 def results(tmp_path: Path, repos: dict[str, tuple[int, list[dict] | None]]) -> Path:
@@ -84,15 +95,24 @@ class FakeGh:
 def run(folder: Path, gh: FakeGh, tmp_path: Path, *flags: str) -> tuple[int, str]:
     summary = tmp_path / "summary.md"
     env = {"GITHUB_REPOSITORY": "o/self", "GITHUB_STEP_SUMMARY": str(summary)}
-    code = script.main([str(folder), *flags], gh=gh, env=env)
+    repos = tmp_path / "repos.txt"
+    repos.write_text("# the list\n" + "\n".join(REPOS) + "\n", encoding="utf-8")
+    code = script.main([str(folder), "--repos", str(repos), *flags], gh=gh, env=env)
     return code, summary.read_text(encoding="utf-8")
 
 
 def test_files_new_disagreements_and_skips_open_and_closed_duplicates(tmp_path):
     a, b, c = item("o/a", "x"), item("o/a", "y"), item("o/b", "z")
     folder = results(tmp_path, {"o/a": (1, [a, b]), "o/b": (1, [c, dict(c)]), "o/ok": (0, [])})
-    # x has an issue (closed, as not planned: the listing is --state all); y's only "match" is a longer marker.
-    gh = FakeGh(issues=[f"old report\n{a['marker']}\n", b["marker"].replace(" -->", "/extra -->")])
+    # x has an issue (closed, as not planned: the listing is --state all); y's only "match" is a longer marker, and
+    # z's marker is only inside another issue's report (scanned text), not on its last line.
+    gh = FakeGh(
+        issues=[
+            f"old report\n{a['marker']}\r\n",
+            b["marker"].replace(" -->", "/extra -->"),
+            f"```text\n{c['marker']}\n```\n\n<!-- bug-hunt o/q uv.lock 3.13 linux-x86_64 q -->\n",
+        ]
+    )
     code, text = run(folder, gh, tmp_path, "--file")
     assert code == 0
     assert gh.kinds() == ["label create", "issue list", "issue create", "issue create"]
@@ -100,10 +120,12 @@ def test_files_new_disagreements_and_skips_open_and_closed_duplicates(tmp_path):
     assert label[:3] == ["label", "create", "bug-hunt"] and "--force" in label
     assert listing[listing.index("--state") + 1] == "all" and listing[listing.index("--label") + 1] == "bug-hunt"
     assert [(t, labels) for t, _, labels in gh.created] == [
-        (b["title"], ["bug", "bug-hunt"]),
-        (c["title"], ["bug", "bug-hunt"]),  # c twice in the JSON: filed once
+        (title(b), ["bug", "bug-hunt"]),
+        (title(c), ["bug", "bug-hunt"]),  # c twice in the JSON: filed once
     ]
-    assert gh.created[0][1] == b["body"]
+    body = gh.created[0][1]
+    assert body == script.issue_body("report for y", b["marker"])
+    assert "\n```text\nreport for y\n```\n\n" in body and body.endswith(f"\n{b['marker']}\n")
     assert "#### Issues filed" in text and "https://github.com/o/self/issues/101" in text
     assert "#### Already filed (open or closed)\n\n- `x==1.0 @ https://pypi.org/simple`" in text
     assert "| `o/ok` | ok | 0 | 10 | 10 | 0 | 0 |" in text
@@ -136,7 +158,7 @@ def test_caps_the_issues_per_run(tmp_path):
     gh = FakeGh()
     code, text = run(folder, gh, tmp_path, "--file")
     assert code == 1  # so the run shows as failed and someone looks
-    assert [t for t, _, _ in gh.created] == [i["title"] for i in items[: script.MAX_ISSUES]] and script.MAX_ISSUES == 5
+    assert [t for t, _, _ in gh.created] == [title(i) for i in items[: script.MAX_ISSUES]] and script.MAX_ISSUES == 5
     assert "#### Over the cap of 5, not filed\n\n- `p5==1.0 @ https://pypi.org/simple`" in text
     assert "- `p6==1.0" in text and "more than the cap of 5" in text
 
@@ -180,8 +202,13 @@ def test_without_file_nothing_calls_gh(tmp_path):
     [
         {"marker": "<!-- bug-hunt o/a --> <img src=x> -->"},
         {"marker": "not a marker"},
-        {"title": "two\nlines"},
-        {"body": "no marker at the end"},
+        {"marker": "<!-- bug-hunt o/a uv.lock 3.13 linux-x86_64 other @ https://pypi.org/simple -->"},
+        {"repo": "o/b"},  # not the repo whose file it's in
+        {"input": "setup.py"},
+        {"target": "3.13 linux-x86_64\n@someone"},
+        {"package": "no-version"},
+        {"report": 5},
+        {"report": "x" * 20_001},
     ],
 )
 def test_malformed_items_are_not_filed(tmp_path, change):
@@ -194,6 +221,14 @@ def test_malformed_items_are_not_filed(tmp_path, change):
 def test_scanned_text_stays_in_code_spans(tmp_path, capsys):
     bad = item("o/a", "x")
     bad["package"] = "x==1 @ https://e.test/|`[a](b)\n::error::hi"
+    bad["marker"] = script.marker_for("o/a", "uv.lock", bad["target"], bad["package"])
+    assert bad["marker"] == "<!-- bug-hunt o/a uv.lock 3.13 linux-x86_64 x @ https://e.test/___a_(b)_::error::hi -->"
     code, text = run(results(tmp_path, {"o/a": (1, [bad])}), FakeGh(), tmp_path)
     assert code == 0
     assert "- `x==1 @ https://e.test/__[a](b)_::error::hi` on" in text
+
+
+def test_results_for_a_repo_not_in_the_list_are_not_used(tmp_path):
+    gh = FakeGh()
+    code, text = run(results(tmp_path, {"o/evil": (1, [item("o/evil", "x")])}), gh, tmp_path, "--file")
+    assert code == 1 and gh.calls == [] and "`o/evil` isn't in bug_hunt_repos.txt" in text

@@ -4,6 +4,8 @@
     uv run --with pip python scripts/check_projects.py run manifest.json -o results/          # check them all
     uv run --with pip python scripts/check_projects.py run manifest.json -o results/ --only owner/name -t win-amd64
     uv run --with pip python scripts/check_projects.py repo OWNER/NAME [--ref COMMIT] [-t TARGET]  # one public repo
+    uv run --with pip python scripts/check_projects.py repo OWNER/NAME --fetch-only DIR   # download only (token here)
+    uv run --with pip python scripts/check_projects.py repo OWNER/NAME --from-dir DIR     # then check, no token
 
 scripts/check_against_pip.py checks one pinned package at a time. This script checks inputs the way projects use
 them: a `uv.lock` with its `pyproject.toml`, a `poetry.lock` with its `pyproject.toml`, or a fully pinned
@@ -205,8 +207,10 @@ Runner = Callable[[list[str], Path, dict[str, str]], tuple[int, str]]
 
 def run_command(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int = UV_TIMEOUT) -> tuple[int, str]:
     """Run a referee command; its stdout and stderr together, since uv writes its plan and errors to stderr. The
-    GitHub token `repo` fetches with never reaches a referee."""
+    GitHub token `repo --fetch-only` fetches with never reaches a referee, and no Python a referee starts puts the
+    folder it runs in (the staged input) on sys.path (pip runs as `python -I -m pip`, too)."""
     env = {k: v for k, v in env.items() if k.upper() not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    env["PYTHONSAFEPATH"] = "1"
     try:
         proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -249,7 +253,9 @@ def requirement_lines(text: str) -> Iterable[tuple[int, str]]:
         line = raw if not buffer else " " + raw.lstrip()
         if not buffer:
             start = number
-        if line.rstrip().endswith("\\"):
+        # As pip's join_lines: a backslash continues a line, but never a comment line (`# note \` then `import os`
+        # is a comment and a line of its own, not one comment).
+        if line.rstrip().endswith("\\") and not re.match(r"\s*#", raw):
             buffer += line.rstrip()[:-1]
             continue
         line = buffer + line
@@ -301,8 +307,17 @@ def make_manifest(corpus: Path) -> dict:
     return {"schema": SCHEMA, "corpus": str(corpus), "inputs": inputs}
 
 
+# The only files an include (-r / -c) may name: anything else (a pip.py) is never fetched or copied, and refuses the
+# file that names it, so nothing but requirements files ever lands where pip runs.
+INCLUDE_SUFFIXES = (".txt", ".in")
+
+
+def includable(name: str) -> bool:
+    return name.endswith(INCLUDE_SUFFIXES)
+
+
 def included_files(folder: Path, name: str, seen: set[str] | None = None) -> list[str]:
-    """The files a requirements file includes with -r / -c, relative to the folder, if they are there."""
+    """The .txt and .in files a requirements file includes with -r / -c, relative to the folder, if they're there."""
     seen = seen if seen is not None else {name}
     out: list[str] = []
     try:
@@ -314,7 +329,7 @@ def included_files(folder: Path, name: str, seen: set[str] | None = None) -> lis
         if not match:
             continue
         rel = os.path.normpath(str(Path(name).parent / match.group(1)))
-        if rel not in seen and not rel.startswith("..") and (folder / rel).is_file():
+        if rel not in seen and not rel.startswith("..") and includable(rel) and (folder / rel).is_file():
             seen.add(rel)
             out += [rel, *included_files(folder, rel, seen)]
     return out
@@ -797,12 +812,12 @@ def uv_sync_referee(run: Runner, cwd: Path, target: Target, lock: LockInfo, conf
     """The uv.lock referee's answer for one target, as a JSON-able dict (it's cached)."""
     triple = pin.uv_platform(target)
     if triple is None:
-        return {"error": "uv's --python-platform can't express this target"}
+        return {"error": "uv's --python-platform can't express this target", "limit": True}
     env = uv_env(target, confdir)
     base = uv_sync_base(target, triple)
     union = conflict_selections(lock.conflicts)
     if isinstance(union, str):
-        return {"error": union}
+        return {"error": union, "limit": True}
     selections = [Selection("default", [])]
     for flags in union:
         label = "all" + ("" if not flags else " " + " ".join(flags))
@@ -879,6 +894,8 @@ def flatten(path: Path, seen: set[Path] | None = None, root: Path | None = None)
     for _, line in requirement_lines(path.read_text(encoding="utf-8", errors="replace")):
         if include := _INCLUDE.match(line):
             child = (path.parent / include.group(1)).resolve()
+            if not includable(include.group(1)):
+                return Flat([], [], refuse=f"{line}: an include that isn't a .txt or .in file")
             if not child.is_relative_to(root):
                 return Flat([], [], refuse=f"{line}: include outside the input's folder")
             if child in seen or not child.is_file():
@@ -923,7 +940,9 @@ def pip_command(target: Target, requirements: Path, report: Path, cache: Path) -
     abi = f"cp{target.major}{target.minor}{'t' if target.freethreaded else ''}"
     platforms = [arg for plat in pin.pip_platforms(target) for arg in ("--platform", plat)]
     return [
-        *(sys.executable, "-m", "pip", "install", "--dry-run", "--ignore-installed", "--no-deps"),
+        # -I: the staged folder is pip's working directory, and `-m` would put it first on sys.path (a staged pip.py
+        # would run instead of pip); it also ignores PYTHON* variables.
+        *(sys.executable, "-I", "-m", "pip", "install", "--dry-run", "--ignore-installed", "--no-deps"),
         *("--only-binary=:all:", "--index-url", pin.INDEX, *platforms),
         *("--python-version", f"{target.major}.{target.minor}", "--implementation", "cp", "--abi", abi),
         *("-r", str(requirements), "--report", str(report)),
@@ -982,7 +1001,10 @@ def pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, cache: Pa
             report.unlink(missing_ok=True)
             cmd = pip_command(target, requirements, report, cache)
             # As a user would type it: without the report and cache paths, which are this run's own.
-            shown = [*cmd[3 : cmd.index("--report")], *cmd[cmd.index("--report") + 2 : cmd.index("--cache-dir")]]
+            shown = [
+                *cmd[cmd.index("-m") + 2 : cmd.index("--report")],
+                *cmd[cmd.index("--report") + 2 : cmd.index("--cache-dir")],
+            ]
             command = shlex.join(["pip", *shown]).replace(str(requirements), "requirements.txt")
             code, log = run(cmd, folder, env)
             runs += 1
@@ -1043,7 +1065,7 @@ def uv_pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, confdi
     """uv's answer for every pin: wheel, no wheel, or left out by its marker (not in the output)."""
     triple = pin.uv_platform(target)
     if triple is None:
-        return {"error": "uv's --python-platform can't express this target"}
+        return {"error": "uv's --python-platform can't express this target", "limit": True}
     env = uv_env(target, confdir)
     status: dict[str, str] = {}
     left = list(flat.pins)
@@ -1063,7 +1085,7 @@ def uv_pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, confdi
             code, output = run(cmd, folder, env)
             runs += 1
             if _BUILT.search(output):
-                return {"error": f"uv built a package: {first_error(output)}", "command": command}
+                return {"error": f"uv built a package ({TRIPWIRE}): {first_error(output)}", "command": command}
             if code == 0:
                 listed = {
                     (canonicalize_name(n), norm_version(v))
@@ -1195,13 +1217,16 @@ def poetry_referee(
     """uv pip compile's answer for Poetry's export, or a refusal of a Python the project leaves out. A range that
     takes some of the target's patch releases and not others (>=3.13.2) can't say which one Poetry would run on."""
     if python is None:
-        return {"error": "poetry.lock's python-versions can't be read for sure"}
+        return {"error": "poetry.lock's python-versions can't be read for sure", "limit": True}
     version = f"{target.major}.{target.minor}"
     first, late = (python.contains(f"{version}.{patch}", prereleases=True) for patch in (0, 99))
     if not first and not late:
         return {"refused": "requires-python", "command": f"poetry.lock's python-versions is {python}"}
     if first != late:
-        return {"error": f"poetry.lock's python-versions ({python}) takes only some {version} patch releases"}
+        return {
+            "error": f"poetry.lock's python-versions ({python}) takes only some {version} patch releases",
+            "limit": True,
+        }
     return uv_pip_referee(run, folder, target, flat, confdir)
 
 
@@ -1301,9 +1326,13 @@ class Cell:
     why: str = ""
     command: str = ""
     in_default: bool | None = None
+    # A check that couldn't be made: a referee's error, a tripwire (it built or wrote something) or a crash, never a
+    # documented "not compared" (a limit of the referee, a refusal, an input that isn't read).
+    failure: bool = False
 
 
 ABSENT = "absent"
+TRIPWIRE = "the input must be refused"
 
 
 def same(wheelgap: str, answer: str, referee: str) -> bool:
@@ -1330,7 +1359,9 @@ def compare(
         return Cell(entry["id"], entry["kind"], referee, mode, label, package, w, a, verdict, why, command)
 
     if answer.get("error"):
-        return [cell("*", "-", "-", NOT_COMPARED, f"{referee}: {answer['error']}", answer.get("command", ""))]
+        failed = cell("*", "-", "-", NOT_COMPARED, f"{referee}: {answer['error']}", answer.get("command", ""))
+        failed.failure = not answer.get("limit")
+        return [failed]
     if "refused" in wheelgap or answer.get("refused"):
         w_refused, a_refused = wheelgap.get("refused"), answer.get("refused")
         if w_refused and a_refused:
@@ -1478,7 +1509,7 @@ def tool_versions() -> dict[str, str]:
             return "unavailable"
         return next(iter((proc.stdout or proc.stderr).strip().splitlines()), "")
 
-    pip_version = re.sub(r" from .* \(python", " (python", first_line([sys.executable, "-m", "pip", "--version"]))
+    pip_version = re.sub(r" from .* \(python", " (python", first_line([sys.executable, "-I", "-m", "pip", "--version"]))
     # The wheelgap being measured is the one imported, which needn't be this script's checkout: name the last commit
     # that changed its source (what the answers depend on), the checkout's HEAD, and whether the source is edited.
     package = Path(wheelgap.__file__).resolve().parent
@@ -1735,10 +1766,15 @@ def _check_poetry(
             return cells, {}
     exported, why, shown = poetry_export(run, main.parent, work, mode)  # the lock's own folder
     if exported is None:
+        # A tripwire, or no Poetry to run, is a failed check; anything else (a stale lock, files Poetry mustn't see)
+        # is the input's own "not compared".
+        failure = TRIPWIRE in why or why.startswith(f"Poetry {POETRY_VERSION} isn't available")
         cells = [
             Cell(entry["id"], kind, "poetry export", mode, pin.label(t), "*", "-", "-", NOT_COMPARED, why, shown)
             for t in targets
         ]
+        for c in cells:
+            c.failure = failure
         return cells, {}
     python = poetry_python(main)
     confdir = work / "_no_uv_config"
@@ -2086,7 +2122,7 @@ def fetch_repo_corpus(repo: str, sha: str, corpus_dir: Path, fetch: Callable[[st
                 if not match:
                     continue
                 rel = os.path.normpath(str(Path(cur).parent / match.group(1))).replace("\\", "/")
-                if rel not in seen and not rel.startswith("..") and not Path(rel).is_absolute():
+                if rel not in seen and not rel.startswith("..") and not Path(rel).is_absolute() and includable(rel):
                     seen.add(rel)
                     if save(rel) is not None:
                         pending.append(rel)
@@ -2152,16 +2188,20 @@ def build_issue_payload(repo: str, sha: str, entry: dict, cell: Cell) -> dict[st
     """Build a JSON-serializable issue payload for one disagreement cell."""
     marker = bug_hunt_marker(repo, entry["main"], cell.target, cell.package)
     name, version, _ = split_key(cell.package)
+    report = format_bug_report(repo, sha, entry, cell)
+    # scripts/bug_hunt_file.py doesn't trust this file's title, body or marker: it builds them again from repo,
+    # input, target, package and report, as here, and refuses an item whose marker differs.
     body = (
         "Found by the weekly bug hunt (`.github/workflows/bug-hunt.yml`): wheelgap and a referee disagree on this "
         "package. The report below is `scripts/check_projects.py`'s output. Its package names, versions and "
         "index URLs come from the scanned repository: check the cell with the two commands before acting on it.\n\n"
-        f"{text_fence(format_bug_report(repo, sha, entry, cell))}\n\n{marker}\n"
+        f"{text_fence(report)}\n\n{marker}\n"
     )
     return {
         "marker": marker,
         "title": plain(f"bug-hunt: {name}=={version} on {cell.target} ({repo})")[:200],
         "body": body,
+        "report": report,
         "repo": repo,
         "commit": sha,
         "input": entry["main"],
@@ -2184,25 +2224,33 @@ def check_repo(
     workers: int = 6,
     own_python: bool = True,
     issues_json: Path | None = None,
+    from_dir: Path | None = None,
     fetch: Callable[[str], bytes] = _urllib_fetch,
     run: Runner = run_command,
     versions: dict[str, str] | None = None,
     out: Any = None,
 ) -> int:
-    """Fetch one public repo at a commit, compare with referees, and print summary + bug reports."""
+    """Fetch one public repo at a commit (or read what `fetch_repo` wrote to `from_dir`, with no network for GitHub),
+    compare with referees, and print summary + bug reports. Exit code: 0 every compared cell agrees, 1 a
+    disagreement, 2 a check that couldn't be made (a referee's error, a tripwire, no input), even with disagreements
+    too, which are still printed and written to `issues_json`."""
     out = out or sys.stdout
     targets = pick_targets(target_names)
     if not targets:
         raise ValueError(f"no target matches {list(target_names)}")
-    sha = resolve_repo_commit(repo, ref, fetch=fetch)
+    fetched = read_fetched(repo, from_dir) if from_dir is not None else None
+    sha = fetched[0] if fetched else resolve_repo_commit(repo, ref, fetch=fetch)
     versions = versions or tool_versions()
     with tempfile.TemporaryDirectory(prefix="wheelgap-repo-") as tmp:
         tmp_path = Path(tmp)
-        corpus_dir = tmp_path / "corpus"
         out_dir = tmp_path / "out"
-        corpus_dir.mkdir()
         out_dir.mkdir()
-        manifest = fetch_repo_corpus(repo, sha, corpus_dir, fetch=fetch)
+        if fetched:
+            manifest = fetched[1]
+        else:
+            corpus_dir = tmp_path / "corpus"
+            corpus_dir.mkdir()
+            manifest = fetch_repo_corpus(repo, sha, corpus_dir, fetch=fetch)
         inputs = manifest["inputs"]
         if not inputs:
             print(f"No supported uv.lock, poetry.lock, or pinned requirements.txt found in {repo}@{sha}.", file=out)
@@ -2238,6 +2286,9 @@ def check_repo(
             if cell.verdict != AGREE:
                 print(f"Target-level ({cell.kind}, {cell.mode}, {cell.target}): {cell.verdict}: {cell.why}", file=out)
         wrong = [c for c in cells if c.verdict == DISAGREE]
+        failures = [c for c in cells if c.failure]
+        if failures:
+            print(f"Failed checks: {len(failures)} (a referee's error, a tripwire or a crash: see above).", file=out)
         for cell in wrong:
             entry = entries[(cell.input, cell.kind)]
             print("", file=out)
@@ -2253,17 +2304,40 @@ def check_repo(
             payload = {
                 "repo": repo,
                 "commit": sha,
-                "summary": summary,
+                "summary": {**summary, "failed_checks": len(failures)},
                 "disagreements": disagreements,
             }
             issues_json.parent.mkdir(parents=True, exist_ok=True)
             issues_json.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
-        errors = [
-            c
-            for c in level
-            if c.verdict == NOT_COMPARED and ": " in c.why and "refuse" not in c.why and "no referee" not in c.why
-        ]
-        return 1 if wrong else 2 if errors and summary["compared"] == 0 else 0
+        # A failed check wins over a disagreement: the disagreements are still reported, and the job must fail.
+        return 2 if failures else 1 if wrong else 0
+
+
+def fetch_repo(repo: str, ref: str | None, corpus_dir: Path, fetch: Callable[[str], bytes] = _urllib_fetch) -> dict:
+    """`repo --fetch-only DIR`: resolve the commit and download the repo's inputs into DIR (corpus.json and
+    repos/OWNER__NAME/), running nothing of them, for `repo --from-dir DIR` to check with no GitHub token."""
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    if any(corpus_dir.iterdir()):
+        raise ValueError(f"{corpus_dir} isn't empty")
+    sha = resolve_repo_commit(repo, ref, fetch=fetch)
+    return fetch_repo_corpus(repo, sha, corpus_dir, fetch=fetch)
+
+
+def read_fetched(repo: str, corpus_dir: Path) -> tuple[str, dict]:
+    """The commit and manifest of a folder `fetch_repo` wrote for this repo."""
+    try:
+        meta = json.loads((corpus_dir / "corpus.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{corpus_dir} has no readable corpus.json: run repo --fetch-only first ({exc})") from None
+    if not (
+        isinstance(meta, list)
+        and len(meta) == 1
+        and isinstance(meta[0], dict)
+        and meta[0].get("full_name") == repo
+        and re.fullmatch(r"[0-9a-f]{40}", str(meta[0].get("sha", "")))
+    ):
+        raise ValueError(f"{corpus_dir}/corpus.json isn't a --fetch-only folder for {repo}")
+    return str(meta[0]["sha"]), make_manifest(corpus_dir)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2282,6 +2356,19 @@ def _main(argv: list[str] | None = None) -> int:
     repo_cmd = sub.add_parser("repo", help="fetch one public GitHub repo and check it against referees")
     repo_cmd.add_argument("repo", help="OWNER/NAME")
     repo_cmd.add_argument("--ref", default=None, help="branch, tag, or commit SHA (default: default branch head)")
+    where = repo_cmd.add_mutually_exclusive_group()
+    where.add_argument(
+        "--fetch-only",
+        type=Path,
+        metavar="DIR",
+        help="only resolve the commit and download the repo's inputs into DIR (the one step that needs a GitHub token)",
+    )
+    where.add_argument(
+        "--from-dir",
+        type=Path,
+        metavar="DIR",
+        help="check what --fetch-only wrote to DIR, with nothing fetched from GitHub",
+    )
     repo_cmd.add_argument("-t", "--target", action="append", default=[], help="only this target: a label or a platform")
     repo_cmd.add_argument("--workers", type=int, default=6, help="referee runs at once (default 6)")
     repo_cmd.add_argument(
@@ -2322,6 +2409,13 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
     if not pin.default_cpython():
         parser.error("run it on a default (GIL) build of CPython: uv pip compile takes its tags' ABI from it")
+    if args.command == "repo" and args.fetch_only is not None:
+        try:
+            manifest = fetch_repo(args.repo, args.ref, args.fetch_only)
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(f"Fetched {args.repo}: {len(manifest['inputs'])} inputs in {args.fetch_only}", file=sys.stderr)
+        return 0
     if args.command == "repo":
         try:
             return check_repo(
@@ -2331,6 +2425,7 @@ def _main(argv: list[str] | None = None) -> int:
                 workers=args.workers,
                 own_python=not args.no_own_python,
                 issues_json=args.issues_json,
+                from_dir=args.from_dir,
             )
         except ValueError as exc:
             parser.error(str(exc))
@@ -2356,7 +2451,17 @@ def _main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # one input's crash is "couldn't compare", never an answer
             got = [
                 Cell(
-                    entry["id"], entry["kind"], "-", "all", pin.label(t), "*", "-", "-", NOT_COMPARED, f"crash: {exc!r}"
+                    entry["id"],
+                    entry["kind"],
+                    "-",
+                    "all",
+                    pin.label(t),
+                    "*",
+                    "-",
+                    "-",
+                    NOT_COMPARED,
+                    f"crash: {exc!r}",
+                    failure=True,
                 )
                 for t in targets
             ]

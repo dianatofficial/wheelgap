@@ -913,7 +913,7 @@ def test_run_command_drops_the_github_token(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
     script.run_command(["true"], tmp_path, {"GITHUB_TOKEN": "t", "GH_TOKEN": "t", "PATH": "/bin"})
-    assert got == {"PATH": "/bin"}
+    assert got == {"PATH": "/bin", "PYTHONSAFEPATH": "1"}  # and no child Python puts its cwd on sys.path
 
 
 def test_fetch_keeps_the_token_off_redirects(monkeypatch):
@@ -997,6 +997,9 @@ def test_pip_referee(tmp_path):
     assert len(fake.calls) == 3
     first = fake.calls[0]
     assert "--only-binary=:all:" in first and "--no-deps" in first and "--isolated" in first
+    # Isolated mode: the staged folder (pip's cwd) is never on sys.path, so a staged pip.py can't run instead of pip.
+    assert first[1:4] == ["-I", "-m", "pip"]
+    assert answer["command"].startswith("pip install --dry-run ")
     assert first[first.index("--abi") + 1] == "cp313"
 
 
@@ -1306,6 +1309,134 @@ def test_main_output_cant_run_workflow_commands(capsys, monkeypatch):
     assert out.err == "x \\u0023#[warning]y\n"
 
 
+# --- the bug hunt's untrusted inputs: includes, comments, fetch then check, failed checks ---------------------------
+
+
+def test_an_include_must_be_a_requirements_file(tmp_path):
+    # `python -m pip` with the staged folder as cwd would import a staged pip.py: never stage, fetch or follow one.
+    (tmp_path / "pip.py").write_text("import os\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("-r pip.py\nfoo==1.0\n", encoding="utf-8")
+    flat = script.flatten(tmp_path / "requirements.txt")
+    assert flat.refuse == "-r pip.py: an include that isn't a .txt or .in file"
+    assert script.included_files(tmp_path, "requirements.txt") == []
+    (tmp_path / "base.in").write_text("idna==3.10\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("-r base.in\n-c pip.py\nfoo==1.0\n", encoding="utf-8")
+    assert script.included_files(tmp_path, "requirements.txt") == ["base.in"]
+
+
+def test_a_backslash_never_continues_a_comment_line(tmp_path):
+    # As pip reads it: `# note \` is a comment on its own, so the next line is a requirement (here an invalid one),
+    # not part of the comment, and a file that is also Python can't hide its code that way.
+    text = "# note \\\nimport os; os.system('x')\nidna==3.10 \\\n  # trailing comment\nsix==1.17.0\n"
+    assert list(script.requirement_lines(text)) == [
+        (2, "import os; os.system('x')"),
+        (3, "idna==3.10"),
+        (5, "six==1.17.0"),
+    ]
+    (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
+    assert "import os" in script.flatten(tmp_path / "requirements.txt").refuse
+
+
+def test_fetch_repo_corpus_never_fetches_a_python_include(tmp_path):
+    sha = "e" * 40
+    raw = f"https://raw.githubusercontent.com/org/demo/{sha}"
+    files = {f"{raw}/requirements.txt": b"-r pip.py\nfoo==1.0\n", f"{raw}/pip.py": b"import os\n"}
+    fetched = []
+
+    def fake_fetch(url: str) -> bytes:
+        fetched.append(url)
+        if url not in files:
+            raise FileNotFoundError(url)
+        return files[url]
+
+    manifest = script.fetch_repo_corpus("org/demo", sha, tmp_path / "corpus", fetch=fake_fetch)
+    assert f"{raw}/pip.py" not in fetched
+    assert not (tmp_path / "corpus" / "repos" / "org__demo" / "pip.py").exists()
+    [entry] = manifest["inputs"]
+    assert entry["files"] == ["requirements.txt"]
+    calls = []
+    cells = script.check_input(entry, [LINUX], tmp_path / "out", VERSIONS, lambda *a: calls.append(a), workers=1)
+    assert calls == [] and all(c.verdict == "not compared" and "isn't a .txt or .in" in c.why for c in cells)
+
+
+def test_fetch_only_then_from_dir_needs_no_github(tmp_path, monkeypatch):
+    import io
+
+    sha = "d" * 40
+    files = {
+        "https://api.github.com/repos/org/demo": json.dumps({"default_branch": "main"}).encode(),
+        "https://api.github.com/repos/org/demo/commits/main": json.dumps({"sha": sha}).encode(),
+        f"https://raw.githubusercontent.com/org/demo/{sha}/requirements.txt": b"six==1.16.0\n",
+    }
+
+    def fake_fetch(url: str) -> bytes:
+        if url not in files:
+            raise FileNotFoundError(url)
+        return files[url]
+
+    corpus = tmp_path / "corpus"
+    manifest = script.fetch_repo("org/demo", None, corpus, fetch=fake_fetch)
+    assert [e["kind"] for e in manifest["inputs"]] == ["requirements"]
+    with pytest.raises(ValueError, match="isn't empty"):
+        script.fetch_repo("org/demo", None, corpus, fetch=fake_fetch)
+    with pytest.raises(ValueError, match="isn't a --fetch-only folder"):
+        script.read_fetched("org/other", corpus)
+    seen = []
+    monkeypatch.setattr(script, "check_input", lambda entry, *args, **kwargs: seen.append(entry) or [])
+
+    def no_fetch(url: str) -> bytes:
+        raise AssertionError(f"fetched {url}")
+
+    out = io.StringIO()
+    code = script.check_repo(
+        "org/demo", target_names=["3.13 linux-x86_64"], from_dir=corpus, fetch=no_fetch, versions=VERSIONS, out=out
+    )
+    assert code == 0 and seen == manifest["inputs"]
+    assert f"Repo: org/demo @ {sha}" in out.getvalue()
+
+
+def test_referee_errors_are_failed_checks_but_limits_are_not():
+    def one(answer):
+        [cell] = script.compare(
+            entry=ENTRY, referee="pip", mode="all", target=LINUX, wheelgap={"rows": {}}, answer=answer
+        )
+        return cell
+
+    tripwire = one({"error": "pip started a build (Building wheel): the input must be refused"})
+    failed = one({"error": "pip: Could not fetch URL https://pypi.org/simple/x/"})
+    limit = one({"error": "uv's --python-platform can't express this target", "limit": True})
+    assert tripwire.failure and failed.failure and not limit.failure
+    assert {tripwire.verdict, failed.verdict, limit.verdict} == {"not compared"}
+
+
+@pytest.mark.parametrize(
+    ("failure", "disagree", "code"), [(True, True, 2), (True, False, 2), (False, True, 1), (False, False, 0)]
+)
+def test_check_repo_failed_checks_win_over_disagreements(tmp_path, monkeypatch, failure, disagree, code):
+    import io
+
+    entry = {"id": "org/demo", "kind": "uv.lock", "main": "uv.lock"}
+    why = "pip: pip started a build (Building wheel): the input must be refused"
+    target = "3.13 linux-x86_64"
+    cells = [
+        script.Cell("org/demo", "uv.lock", "pip", "all", target, "*", "-", "-", "not compared", why, failure=failure)
+    ]
+    if disagree:
+        package = "w==1.0 @ https://pypi.org/simple"
+        cells.append(
+            script.Cell("org/demo", "uv.lock", "uv sync", "all", target, package, "wheel", "source", "disagree")
+        )
+    monkeypatch.setattr(script, "resolve_repo_commit", lambda repo, ref, fetch: "b" * 40)
+    monkeypatch.setattr(script, "fetch_repo_corpus", lambda repo, sha, corpus_dir, fetch: {"inputs": [entry]})
+    monkeypatch.setattr(script, "check_input", lambda *args, **kwargs: cells)
+    path = tmp_path / "issues.json"
+    got = script.check_repo("org/demo", target_names=[target], issues_json=path, versions=VERSIONS, out=io.StringIO())
+    assert got == code
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["summary"]["failed_checks"] == int(failure)
+    assert len(data["disagreements"]) == int(disagree)  # still reported next to the failed check
+
+
 # --- poetry.lock: poetry export, then uv pip compile -------------------------------------------------------------
 
 POETRY_LOCK = """\
@@ -1503,6 +1634,9 @@ def test_poetry_export_failures_are_not_compared(tmp_path, export, why):
         ("default", "*", "not compared"),
     }
     assert all(why in c.why for c in cells if c.mode == "all" or not export[2])
+    # A tripwire is a failed check (the repo is an error row); a stale lock or no file is the input's own.
+    tripwire = why in ("started to lock or build", "wrote into the project folder")
+    assert {c.failure for c in cells if c.mode == "all"} == {tripwire}
     if export[2]:
         assert all("poetry export would see ['.poetry', 'poetry.lock', 'pyproject.toml']" in c.why for c in cells[1:])
 
