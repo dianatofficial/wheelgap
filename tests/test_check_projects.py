@@ -804,12 +804,12 @@ def test_check_input_stages_outside_the_output_folder(tmp_path, monkeypatch):
 def test_flatten_reads_includes_and_markers(tmp_path):
     (tmp_path / "base.txt").write_text("idna==3.10 \\\n  --hash=sha256:aa\n", encoding="utf-8")
     (tmp_path / "requirements.txt").write_text(
-        "--extra-index-url https://example.test/simple\n-r base.txt\nsix==1.17.0 ; sys_platform == 'win32'\n",
+        "--extra-index-url https://pypi.org/simple\n--pre\n-r base.txt\nsix==1.17.0 ; sys_platform == 'win32'\n",
         encoding="utf-8",
     )
     flat = script.flatten(tmp_path / "requirements.txt")
     assert flat.refuse is None
-    assert flat.options == ["--extra-index-url https://example.test/simple"]
+    assert flat.options == ["--pre"]  # PyPI's own index is dropped: the referees use it anyway
     assert [(p.name, p.version, p.marker, p.line) for p in flat.pins] == [
         ("idna", "3.10", "", "idna==3.10"),
         ("six", "1.17.0", 'sys_platform == "win32"', "six==1.17.0 ; sys_platform == 'win32'"),
@@ -839,6 +839,18 @@ def test_flatten_reads_includes_and_markers(tmp_path):
         "--extra-index-url https://x.test/simple \\\n  --only-binary :none:",
         "-i --no-binary=:all:",
         "--extra-index-url https://x.test/${GITHUB_TOKEN}/simple",  # pip and uv expand it from os.environ
+        # A scanned file never points the referees at an index or host of its own, or marks one as trusted.
+        "-i https://x.test/simple",
+        "--index-url=https://x.test/simple",
+        "--index-url https://pypi.org.x.test/simple",
+        "--extra-index-url https://download.pytorch.org/whl/cpu",
+        "--extra-index-url=http://pypi.org/simple",
+        "--trusted-host x.test",
+        "--trusted-host=pypi.org",
+        "--find-links https://x.test/links",
+        "-f https://x.test/links",
+        "--no-index",
+        "--index-strategy unsafe-best-match",
     ],
 )
 def test_flatten_refuses(tmp_path, line):
@@ -847,12 +859,88 @@ def test_flatten_refuses(tmp_path, line):
 
 
 @pytest.mark.parametrize(
-    "line", ["-i https://pypi.org/simple", "--index-url=https://pypi.org/simple", "--trusted-host x.test", "--pre"]
+    ("line", "options"),
+    [
+        ("-i https://pypi.org/simple", []),
+        ("--index-url=https://pypi.org/simple/", []),
+        ("--extra-index-url https://pypi.org/simple", []),
+        ("--pre", ["--pre"]),
+        ("--prefer-binary", ["--prefer-binary"]),
+    ],
 )
-def test_flatten_passes_index_options(tmp_path, line):
+def test_flatten_passes_only_safe_options(tmp_path, line, options):
     (tmp_path / "requirements.txt").write_text(f"{line}\nidna==3.10\n", encoding="utf-8")
     flat = script.flatten(tmp_path / "requirements.txt")
-    assert flat.refuse is None and flat.options == [line]
+    assert flat.refuse is None and flat.options == options
+
+
+def test_a_requirements_file_with_its_own_index_is_not_compared(tmp_path):
+    (tmp_path / "requirements.txt").write_text(
+        "--extra-index-url https://x.test/simple\n--trusted-host x.test\nidna==3.10\n", encoding="utf-8"
+    )
+    entry = {"id": "o/r", "kind": "requirements", "dir": str(tmp_path), "main": "requirements.txt"}
+    entry["files"] = ["requirements.txt"]
+    calls = []
+    cells = script.check_input(entry, [LINUX], tmp_path / "out", VERSIONS, lambda *a: calls.append(a), workers=1)
+    assert calls == []  # no referee ran
+    assert cells and all(c.verdict == "not compared" and "only read PyPI" in c.why for c in cells)
+
+
+def test_referees_never_get_an_index_option(tmp_path):
+    # Even a Flat built some other way: only --pre and --prefer-binary reach a referee's requirements file.
+    flat = script.Flat(
+        [script.Pin("a", "1.0", "", "a==1.0")],
+        ["--index-url https://x.test/simple", "--trusted-host x.test", "--pre", "-f https://x.test/links"],
+    )
+    seen = []
+
+    def fake(cmd, cwd, env):
+        path = cmd[cmd.index("-r") + 1] if "-r" in cmd else cmd[3]
+        seen.append(Path(path).read_text(encoding="utf-8"))
+        return 0, "a==1.0\n"
+
+    script.pip_referee(fake, tmp_path, LINUX, flat, tmp_path / "cache")
+    script.uv_pip_referee(fake, tmp_path, LINUX, flat, tmp_path)
+    assert len(seen) == 2 and all(text == "--pre\na==1.0\n" for text in seen)
+
+
+def test_run_command_drops_the_github_token(monkeypatch, tmp_path):
+    got = {}
+
+    def fake_run(cmd, cwd, env, **kwargs):
+        got.update(env)
+        return script.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    script.run_command(["true"], tmp_path, {"GITHUB_TOKEN": "t", "GH_TOKEN": "t", "PATH": "/bin"})
+    assert got == {"PATH": "/bin"}
+
+
+def test_fetch_keeps_the_token_off_redirects(monkeypatch):
+    sent = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(req, timeout):
+        sent.append(req)
+        return Response()
+
+    monkeypatch.setattr(script.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    script._urllib_fetch("https://api.github.com/repos/o/r")
+    script._urllib_fetch("https://raw.githubusercontent.com/o/r/x/uv.lock")
+    api, raw = sent
+    # Unredirected headers aren't copied to a redirect's request by urllib's HTTPRedirectHandler.
+    assert api.unredirected_hdrs == {"Authorization": "Bearer secret"} and "Authorization" not in api.headers
+    assert not raw.has_header("Authorization")
 
 
 def test_pip_sdist_seen():
@@ -1181,10 +1269,41 @@ wheels = [{ url = "https://files.pythonhosted.org/o/okpkg-1.0-py3-none-any.whl" 
     disagreements = payload["disagreements"]
     assert len(disagreements) == 1
     item = disagreements[0]
-    expected_marker = "<!-- bug-hunt org/demo uv.lock 3.13 linux-x86_64 winthing==1.0 @ https://pypi.org/simple -->"
+    # No version in the marker: a lock that bumps winthing doesn't file the same bug again.
+    expected_marker = "<!-- bug-hunt org/demo uv.lock 3.13 linux-x86_64 winthing @ https://pypi.org/simple -->"
     assert item["marker"] == expected_marker
-    assert expected_marker in item["body"]
+    assert item["body"].endswith(f"\n{expected_marker}\n")
+    assert "\n```text\n--- Bug report: org/demo @ " in item["body"]  # the scanned repo's text never renders
+    assert item["title"] == "bug-hunt: winthing==1.0 on 3.13 linux-x86_64 (org/demo)"
     assert item["package"] == "winthing==1.0 @ https://pypi.org/simple"
+
+
+def test_bug_hunt_marker_and_title_hold_no_markup():
+    marker = script.bug_hunt_marker("o/r", "uv.lock", "3.13 win-amd64", "x==1 @ https://e.test/--> @someone\n[a](b)")
+    assert marker == "<!-- bug-hunt o/r uv.lock 3.13 win-amd64 x @ https://e.test/--_ _someone__a_(b) -->"
+    assert marker.count("-->") == 1 and "\n" not in marker
+    assert script.bug_hunt_marker("o/r", "requirements.txt", "3.13 win-amd64", "x==2.0") == (
+        "<!-- bug-hunt o/r requirements.txt 3.13 win-amd64 x -->"
+    )
+
+
+@pytest.mark.parametrize(("text", "fence"), [("plain @user [x](y)", "```"), ("a ``` b ````` c", "``````")])
+def test_text_fence_outlasts_the_text(text, fence):
+    assert script.text_fence(text) == f"{fence}text\n{text}\n{fence}"
+
+
+def test_main_output_cant_run_workflow_commands(capsys, monkeypatch):
+    def fake_check_repo(repo, **kwargs):
+        print("::error::from a lockfile")
+        print("x ##[warning]y", file=sys.stderr)
+        return 0
+
+    monkeypatch.setattr(script, "check_repo", fake_check_repo)
+    monkeypatch.setattr(script.pin, "default_cpython", lambda: True)
+    assert script.main(["repo", "o/r"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "\\u003a:error::from a lockfile\n"
+    assert out.err == "x \\u0023#[warning]y\n"
 
 
 # --- poetry.lock: poetry export, then uv pip compile -------------------------------------------------------------

@@ -21,9 +21,10 @@ data: nothing in them is run, no project is installed and no build backend runs.
 into a fresh temporary folder (removed afterwards), and uv and pip only read them there:
 - uv sync runs as a dry run, which plans from the lock without building; pass 1 adds --no-build, and every uv
   run stops the check if its output says it built anything;
-- pip and uv pip compile run with --only-binary :all:, and a requirements file passes on only index options
-  (-i/--index-url, --extra-index-url, --trusted-host, --pre, --prefer-binary): any other option, such as an
-  --only-binary :none: or --find-links that would bring back an sdist, refuses the file before a referee runs;
+- pip and uv pip compile run with --only-binary :all: and PyPI as the only index, and a requirements file passes
+  on only --pre and --prefer-binary (an -i/--index-url/--extra-index-url naming PyPI is dropped): any other
+  option, such as an --only-binary :none: or --find-links that would bring back an sdist, or an index or
+  --trusted-host of the file's own, refuses the file before a referee runs (not compared);
   pip's log is also checked for "Preparing metadata", "Getting requirements to build" and "Building wheel";
 - Poetry only runs `poetry export` (see below), offline, on the staged poetry.lock and pyproject.toml.
 This was checked with a canary sdist whose setup.py writes a file: given in a requirements file with
@@ -170,6 +171,7 @@ from packaging.version import InvalidVersion, Version
 import wheelgap
 from wheelgap import Result, __version__, check_lockfile, make_targets
 from wheelgap.check import Status
+from wheelgap.logsafe import guarded_output
 from wheelgap.sources import SourceError
 from wheelgap.targets import Target
 
@@ -202,7 +204,9 @@ Runner = Callable[[list[str], Path, dict[str, str]], tuple[int, str]]
 
 
 def run_command(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int = UV_TIMEOUT) -> tuple[int, str]:
-    """Run a referee command; its stdout and stderr together, since uv writes its plan and errors to stderr."""
+    """Run a referee command; its stdout and stderr together, since uv writes its plan and errors to stderr. The
+    GitHub token `repo` fetches with never reaches a referee."""
+    env = {k: v for k, v in env.items() if k.upper() not in ("GITHUB_TOKEN", "GH_TOKEN")}
     try:
         proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -845,12 +849,22 @@ class Flat:
     refuse: str | None = None
 
 
-# A whole line that is one index option and its value: pip reads every option on a line (`--pre --no-binary :all:`
-# turns builds back on), so a line that only starts with one of these isn't enough. No `$` in the value: pip and uv
-# expand ${VAR} from this machine's environment, which would send it to the file's index.
-_SAFE_OPTION = re.compile(
-    r"^(?:(?:-i|--index-url|--extra-index-url|--trusted-host)(?:\s*=\s*|\s+)(?!-)[^\s$]+|--pre|--prefer-binary)$"
-)
+# The only options a requirements file passes on to the referees, each a whole line: pip reads every option on a
+# line (`--pre --no-binary :all:` turns builds back on), so a line that only starts with one of these isn't enough.
+_SAFE_OPTION = re.compile(r"^(?:--pre|--prefer-binary)$")
+# An index option naming PyPI's own index, which the referees use anyway (pin.INDEX), is dropped. Any other index,
+# a --trusted-host or a --find-links refuses the file: a scanned repo must never point the referees (run by a
+# scheduled job, with the network) at a host of its choosing, or mark one as trusted. No `$` in the value: pip and
+# uv expand ${VAR} from this machine's environment.
+_INDEX_OPTION = re.compile(r"^(?:-i|--index-url|--extra-index-url)(?:\s*=\s*|\s+)(?P<url>(?!-)[^\s$]+)$")
+_PYPI_INDEXES = frozenset({"https://pypi.org/simple", "https://pypi.org/simple/"})
+
+
+def referee_options(flat: Flat) -> list[str]:
+    """The options a referee's requirements file may hold: only --pre and --prefer-binary, whatever made `flat`."""
+    return [option for option in flat.options if _SAFE_OPTION.match(option)]
+
+
 _INCLUDE = re.compile(r"^(?:-r|--requirement)(?:\s*=\s*|\s+|(?=\S))(\S+)$")
 
 
@@ -876,11 +890,21 @@ def flatten(path: Path, seen: set[Path] | None = None, root: Path | None = None)
             flat.options += sub.options
             continue
         if line.startswith("-"):
-            # Only options that change where pip and uv look, never what they may build: anything else (an
+            # Only --pre and --prefer-binary, which never change what pip and uv may build: anything else (an
             # --only-binary :none: or --no-binary that overrides --only-binary=:all:, --find-links to a local
             # sdist, -c, -e, --config-settings, ...) refuses the file, so no referee ever runs a build backend.
+            # Nor does any reach an index or host the file names (see _INDEX_OPTION).
+            index = _INDEX_OPTION.match(line)
+            if index and index["url"] in _PYPI_INDEXES:
+                continue
+            if index or re.match(r"^--trusted-host\b", line):
+                return Flat(
+                    [],
+                    [],
+                    refuse=f"{line.split()[0]} in the file: the referees only read PyPI, not the file's own index",
+                )
             if not _SAFE_OPTION.match(line):
-                return Flat([], [], refuse=f"{line.split()[0]} in the file: only index options are passed to referees")
+                return Flat([], [], refuse=f"{line.split()[0]} in the file: it isn't passed to the referees")
             flat.options.append(line)
             continue
         text = strip_hashes(line)
@@ -952,7 +976,9 @@ def pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, cache: Pa
         for _ in range(MAX_RUNS):
             if not left:
                 break
-            requirements.write_text("\n".join([*flat.options, *(p.line for p in left)]) + "\n", encoding="utf-8")
+            requirements.write_text(
+                "\n".join([*referee_options(flat), *(p.line for p in left)]) + "\n", encoding="utf-8"
+            )
             report.unlink(missing_ok=True)
             cmd = pip_command(target, requirements, report, cache)
             # As a user would type it: without the report and cache paths, which are this run's own.
@@ -1026,7 +1052,7 @@ def uv_pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, confdi
         requirements = Path(tmp) / "requirements.txt"
         for _ in range(MAX_RUNS):
             lines = [
-                *flat.options,
+                *referee_options(flat),
                 *(p.line + (f" ; {p.marker}" if p.marker and ";" not in p.line else "") for p in left),
             ]
             requirements.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1983,12 +2009,12 @@ def report(cells: Sequence[Cell], versions: dict[str, str], seconds: float, out=
 
 
 def _urllib_fetch(url: str) -> bytes:
-    headers = {"User-Agent": "wheelgap-check-projects"}
+    req = urllib.request.Request(url, headers={"User-Agent": "wheelgap-check-projects"})
     if url.startswith("https://api.github.com/"):
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         if token:
-            headers["Authorization"] = f"Bearer {token.strip()}"
-    req = urllib.request.Request(url, headers=headers)
+            # Unredirected: urllib copies a request's other headers to wherever a redirect points.
+            req.add_unredirected_header("Authorization", f"Bearer {token.strip()}")
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=25) as resp:
@@ -2095,18 +2121,46 @@ def format_bug_report(repo: str, sha: str, entry: dict, cell: Cell) -> str:
     return "\n".join(lines)
 
 
+# Text from a scanned repo (a lock's registry URL, a version string) goes into an issue's title and its dedup
+# marker: anything but these characters becomes `_`, so it can't end the HTML comment (`-->`), mention someone or
+# add a line.
+_PLAIN = re.compile(r"[^A-Za-z0-9 ._:/=+~!(),-]")
+
+
+def plain(text: str) -> str:
+    return _PLAIN.sub("_", text)
+
+
 def bug_hunt_marker(repo: str, input_name: str, target: str, package: str) -> str:
-    """Stable HTML comment used to deduplicate bug-hunt issues across runs."""
-    return f"<!-- bug-hunt {repo} {input_name} {target} {package} -->"
+    """The HTML comment that deduplicates bug-hunt issues across runs: repo, input, target and the package's name
+    (with its index, for a uv.lock), without its version, so a lock that bumps the package doesn't file the same
+    bug again."""
+    name, _, source = split_key(package)
+    what = f"{plain(name)} @ {plain(source)}" if source else plain(name)
+    return f"<!-- bug-hunt {plain(repo)} {plain(input_name)} {plain(target)} {what} -->"
+
+
+def text_fence(text: str) -> str:
+    """`text` in a ```text fence longer than any run of backticks in it, so none of it renders as Markdown (links,
+    @-mentions, images, HTML)."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
 
 
 def build_issue_payload(repo: str, sha: str, entry: dict, cell: Cell) -> dict[str, Any]:
     """Build a JSON-serializable issue payload for one disagreement cell."""
     marker = bug_hunt_marker(repo, entry["main"], cell.target, cell.package)
-    body = f"{format_bug_report(repo, sha, entry, cell)}\n\n{marker}\n"
+    name, version, _ = split_key(cell.package)
+    body = (
+        "Found by the weekly bug hunt (`.github/workflows/bug-hunt.yml`): wheelgap and a referee disagree on this "
+        "package. The report below is `scripts/check_projects.py`'s output. Its package names, versions and "
+        "index URLs come from the scanned repository: check the cell with the two commands before acting on it.\n\n"
+        f"{text_fence(format_bug_report(repo, sha, entry, cell))}\n\n{marker}\n"
+    )
     return {
         "marker": marker,
-        "title": f"bug-hunt: {cell.package} on {cell.target} ({repo})"[:200],
+        "title": plain(f"bug-hunt: {name}=={version} on {cell.target} ({repo})")[:200],
         "body": body,
         "repo": repo,
         "commit": sha,
@@ -2213,6 +2267,13 @@ def check_repo(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Package keys (with a lock's registry URL), uv and pip error excerpts and commands come from the inputs: none of
+    # it may run as a GitHub Actions workflow command in a CI log, as in wheelgap's own CLI (see wheelgap.logsafe).
+    with guarded_output():
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[1].split(".")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     make = sub.add_parser("manifest", help="list a corpus folder's inputs in a manifest file")
