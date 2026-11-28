@@ -195,6 +195,11 @@ class Source:
     # for those environments only: `uv sync` fails anywhere else, and the lock leaves out the packages and wheels
     # that only other environments need (see check.check_lock_environments).
     supported_markers: list[str] = field(default_factory=list)
+    # pdm.lock only: its [[metadata.targets]] (`pdm lock --platform/--python/--implementation`), each a table of
+    # requires_python, platform, implementation and gil_disabled. `pdm install` refuses an environment none of them
+    # takes ("No compatible lock target found"), and a lock made for a platform keeps only that platform's packages
+    # and wheels (see check.pdm_target_value).
+    pdm_targets: list[dict] = field(default_factory=list)
     # Scripts and pyproject.toml: uv's exclude-newer (#521). A file uploaded at or after the cutoff isn't installed;
     # exclude-newer-package gives the packages it names their own cutoff, or none (uv's `false`: None here).
     exclude_newer: datetime | None = None
@@ -240,6 +245,10 @@ class Source:
     # by the groups Poetry records on them.
     poetry_tables: list[dict] | None = None
     poetry_pyproject: Path | None = None
+    # poetry.lock before lock-version 2.1 with no readable pyproject.toml beside it, or one that declares nothing: why
+    # its direct dependencies are unknown. check() then makes a package the walk leaves out on a target `unknown`
+    # there when it would have a gap.
+    poetry_roots_unknown: str | None = None
     # poetry.lock only: the extras in its [extras] table, which `poetry install --extras` accepts.
     poetry_lock_extras: list[str] = field(default_factory=list)
     # poetry.lock after a selection: the note that says where extras couldn't leave packages out, because Poetry
@@ -1518,13 +1527,13 @@ def parse_poetry_lock(path: Path) -> Source:
             url = p.get("source", {}).get("url")
             pkg.registry = url if isinstance(url, str) else None
             entries = p.get("files")
-            if entries is None:
+            if not entries:
                 entries = legacy_files.get(p["name"])
-            # No files recorded at all (old [metadata.hashes] locks): PyPI packages are looked up on the index,
-            # packages from another index are skipped (fill_all).
-            pkg.files = (
-                None if entries is None else [f for f in (_filename(e, path.name, pkg.name) for e in entries) if f]
-            )
+            # No files recorded (old [metadata.hashes] locks, or `files = []`, which Poetry writes when the source
+            # gave it no hashes): Poetry installs the best file the index has, unchecked (`if not package.files:
+            # return ordered_links[0]` in poetry/installation/chooser.py). So PyPI packages are looked up on the
+            # index and packages from another index are skipped (fill_all), rather than read as having no files.
+            pkg.files = None if not entries else [f for f in (_filename(e, path.name, pkg.name) for e in entries) if f]
         edges[len(pkgs)] = _poetry_edges(p)
         requires = p.get("python-versions")
         # Not before 2.1: a direct dependency's Python marker is only in pyproject.toml there, so the range could
@@ -1537,9 +1546,20 @@ def parse_poetry_lock(path: Path) -> Source:
         roots = set(_graph_roots(pkgs, edges))
         # The project's own dependencies are roots too, even if another package also depends on them
         # under a marker (colorama directly, and via click only on Windows).
-        declared = _project_dependencies(path.parent / "pyproject.toml")
-        roots |= {i for i, p in enumerate(pkgs) if p.key in declared}
-        return Source(path.name, pkgs, edges=edges, roots=sorted(roots), poetry_tables=data.get("package", []))
+        pyproject = path.parent / "pyproject.toml"
+        declared = _project_dependencies(pyproject)
+        roots |= {i for i, p in enumerate(pkgs) if p.key in (declared or ())}
+        source = Source(path.name, pkgs, edges=edges, roots=sorted(roots), poetry_tables=data.get("package", []))
+        if not declared:
+            # Without them, a direct dependency that another package needs only under a marker would be hidden
+            # wherever the marker is false: check() makes such a package `unknown` where it would have a gap (#815).
+            source.poetry_roots_unknown = (
+                f"there is no pyproject.toml beside {path.name}"
+                if not pyproject.is_file()
+                else f"the pyproject.toml beside {path.name} "
+                + ("can't be read" if declared is None else "declares no dependencies")
+            )
+        return source
     extras = data.get("extras")
     return Source(
         path.name,
@@ -1608,13 +1628,13 @@ def _components(n: int, succ: dict[int, list[int]]) -> list[int]:
     return comp
 
 
-def _project_dependencies(pyproject: Path) -> set[str]:
-    """Names a project declares itself (PEP 621 and Poetry tables), to use as roots for poetry.lock.
-    A missing or odd pyproject.toml just means no extra roots: it must never break the run."""
+def _project_dependencies(pyproject: Path) -> set[str] | None:
+    """Names a project declares itself (PEP 621 and Poetry tables), to use as roots for poetry.lock, or None when
+    the pyproject.toml is missing or isn't UTF-8 TOML. Odd values in a readable one are left out, never an error."""
     try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8-sig"))
     except Exception:
-        return set()
+        return None
 
     def table(value: object) -> dict:
         return value if isinstance(value, dict) else {}
@@ -1720,9 +1740,21 @@ def parse_pdm_lock(path: Path) -> Source:
         if inherit_metadata and pkg.files is not None and isinstance(requires, str):
             pkg.locked_requires_python = requires
         _add_once(pkgs, seen, pkg)
+    targets = metadata.get("targets", [])
+    if not isinstance(targets, list) or not all(isinstance(t, dict) for t in targets):
+        raise SourceError(f"{path.name}: `metadata.targets` isn't a list of tables")
+    for t in targets:
+        if not all(isinstance(t.get(k, ""), str) for k in ("requires_python", "platform", "implementation")) or (
+            not isinstance(t.get("gil_disabled", False), bool)
+        ):
+            raise SourceError(
+                f"{path.name}: a `metadata.targets` entry needs strings for requires_python, platform and "
+                "implementation, and a boolean gil_disabled"
+            )
     return Source(
         path.name,
         pkgs,
+        pdm_targets=targets,
         pdm_groups=[groups[(pkg.key, pkg.version)] for pkg in pkgs],
         pdm_locked_groups=(
             [canonicalize_name(g) for g in locked_groups if isinstance(g, str)]
