@@ -5135,6 +5135,69 @@ def test_dockerfile_requirements_warns_about_a_local_npm_install_with_a_package_
         dockerfile_requirements(path, constraints={}, dependencies=True)
 
 
+@pytest.mark.parametrize(
+    ("body", "warns"),
+    [
+        # A clone by an earlier RUN, then an npm install in the clone: its package.json is the project's own.
+        ("RUN git clone https://example.com/web.git /srv/web && cd /srv/web && npm install left-pad\n", True),
+        # A package.json written by an earlier RUN into the working folder.
+        ("RUN printf '{}' > /app/package.json\nRUN npm install left-pad\n", True),
+        # A package.json downloaded into the working folder: the URL names it.
+        ("RUN wget -q https://example.com/web/package.json && npm install left-pad\n", True),
+        # An empty package.json made by touch.
+        ("RUN touch /app/package.json\nRUN npm install left-pad\n", True),
+        # An archive unpacked into a parent of the install folder.
+        ("RUN tar xf /tmp/web.tar -C /srv && cd /srv/web && npm install left-pad\n", True),
+        # A glob that matches the install folder.
+        ("RUN cp -r /tmp/web/. /srv/w* && cd /srv/web && npm install left-pad\n", True),
+        # A clone with no folder named: git makes one from the repository's name.
+        ("RUN git clone --depth 1 https://example.com/web.git && cd web && npm install left-pad\n", True),
+        # A destination given as an option with the path attached.
+        ("RUN cp -r /tmp/web --target-directory=/srv && cd /srv/web && npm install left-pad\n", True),
+        ("RUN cp -r -t/srv /tmp/web && cd /srv/web && npm install left-pad\n", True),
+        # A relative one, read in the RUN's folder.
+        ("RUN cp -r /tmp/web -t. && cd web && npm install left-pad\n", True),
+        ("RUN cp -r /tmp/web -tdeps && cd deps/web && npm install left-pad\n", True),
+        # A clone whose option takes a value: the folder comes from the URL, not from the value.
+        ("RUN git clone --revision v1.2 https://example.com/web.git && cd web && npm install left-pad\n", True),
+        # An option wheelgap doesn't know may take a value, so the clone's folder isn't known.
+        ("RUN git clone --newopt x https://example.com/web.git /srv/other\nRUN npm install left-pad\n", True),
+        # A clone into an unrelated folder leaves the npm install a plain program.
+        ("RUN git clone --revision v1.2 https://example.com/web.git /srv/other\nRUN npm install left-pad\n", False),
+        # A folder with a variable wheelgap can't resolve in the middle of it.
+        ("ARG NAME\nRUN tar xf /tmp/web.tar -C /srv/$NAME && cd /srv/web && npm install left-pad\n", True),
+        # An earlier RUN in an unrelated folder leaves the npm install a plain program.
+        ("RUN mkdir -p /srv/other\nRUN npm install left-pad\n", False),
+        ("RUN cp /tmp/a /srv/other/\nRUN npm install left-pad\n", False),
+        # Options and URLs of a command run in a folder wheelgap doesn't know aren't paths in the image.
+        ("RUN cd /opt/tool-* && curl -fsSLO https://example.com/tool.tar.gz\nRUN npm install left-pad\n", False),
+        # So does a mkdir of the working folder itself: it adds no package.json.
+        ("RUN mkdir -p /app/cache /app\nRUN npm install left-pad\n", False),
+    ],
+)
+def test_dockerfile_requirements_checks_package_json_made_by_an_earlier_run(tmp_path, body, warns):
+    head = "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt .\n"
+    path = _context(tmp_path, head + body + _INSTALL, ("requirements.txt",))
+    report = InputsReport()
+    dockerfile_requirements(path, report=report, uv_installs=set(), constraints={})
+    assert bool(report.warnings) is warns
+    if warns:
+        with pytest.raises(DockerfileError, match="runs the project's own code"):
+            dockerfile_requirements(path, constraints={}, dependencies=True)
+
+
+def test_dockerfile_requirements_checks_npm_install_after_a_heredoc_package_json(tmp_path):
+    # A package.json written by a heredoc, whose script wheelgap doesn't read: the npm install after it isn't passed
+    # over. The pip install comes before the heredoc, since one after it would stop the answer (line 6199's rule).
+    head = "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt .\n"
+    body = _INSTALL + "RUN cat <<'EOF' > /app/package.json\n{}\nEOF\nRUN npm install left-pad\n"
+    path = _context(tmp_path, head + body, ("requirements.txt",))
+    report = InputsReport()
+    dockerfile_requirements(path, report=report, uv_installs=set(), constraints={})
+    assert report.warnings
+    assert [spelling for _, spelling, *_ in report.scripts] == ["npm install"]  # not passed over
+
+
 def test_dockerfile_requirements_warns_about_an_npm_install_below_a_package_json(tmp_path):
     # npm's project is the nearest folder up the tree with a package.json: one copied into /app counts for an
     # install run in /app/scripts, which has none itself.

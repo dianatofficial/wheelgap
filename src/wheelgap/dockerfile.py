@@ -1605,14 +1605,58 @@ def _names_in_folder(copies: list[_Copy], dirs: set[str], folder: str) -> list[t
     return names
 
 
-def _may_carry_package_json(copies: list[_Copy], dirs: set[str], folder: str) -> bool:
+def _unresolved(text: str) -> bool:
+    """Whether a word is a path wheelgap can't resolve: a variable or a command substitution anywhere in it (as
+    written, since the word isn't exact), or a leading tilde."""
+    return "$" in text or "`" in text or text.startswith("~")
+
+
+def _may_carry_package_json(
+    copies: list[_Copy],
+    dirs: set[str],
+    folder: str,
+    mentions: list[tuple[int, str, str | None]],
+    created: list[tuple[int, str, str | None]],
+) -> bool:
     """Whether a package.json may be in `folder` of the image: an entry the COPY instructions so far may put there
-    (_names_in_folder), or one wheelgap can't list — an unreadable COPY or ADD, or a COPY --from whose tree reaches
-    it. npm runs the scripts of a project's workspaces and file: dependencies for a named install too, so a local
-    `npm install X` is only a plain program while no package.json can be in its working folder yet."""
+    (_names_in_folder), an earlier command that wheelgap doesn't read and that may write the folder, a parent of it
+    or a package.json (`mentions`, with the folder each ran in), a mkdir, touch, ln or install that names its
+    package.json (`created`: a mkdir of the folder itself adds no file), or one wheelgap can't list — an unreadable
+    COPY or ADD, or a COPY --from whose tree reaches it. npm runs the scripts of a project's workspaces and file:
+    dependencies for a named install too, so a local `npm install X` is only a plain program while no package.json
+    can be in its working folder yet."""
     if any(name == "package.json" for name, _ in _names_in_folder(copies, dirs, folder)):
         return True
     target = posixpath.join(folder, "package.json")
+    for _, text, cwd in mentions:
+        if posixpath.basename(text.rstrip("/")) == "package.json" or _unresolved(text):
+            return True  # a package.json by name (a download's URL too), or a path wheelgap can't resolve
+        if text.startswith("--"):
+            # An option names a path only with its value attached: `--target-directory=/srv/web`.
+            texts = [text.partition("=")[2]] if "=" in text else []
+        elif text.startswith("-"):
+            # `-t/srv/web`, `-t.`, `-tdeps/web`: the value after the letter, or (in a cluster such as `-rt/srv`)
+            # from its first slash. A relative one counts only in a known folder, so `-rf` there costs a needless
+            # check, never a warning in every RUN whose folder isn't known.
+            texts = [text[2:]] if cwd is not None else []
+            texts += [text[text.index("/") :]] if "/" in text[2:] else []
+        else:
+            texts = [text]
+        for each in texts:
+            if not each or each.startswith("-") or "://" in each:
+                continue  # an option, or a URL: not a path in the image
+            if cwd is None and not each.startswith("/"):
+                return True  # a relative name in a folder wheelgap doesn't know
+            path = posixpath.normpath(posixpath.join(cwd or "/", each))
+            if fnmatch.fnmatchcase(folder, path) or fnmatch.fnmatchcase(target, path):
+                return True
+            if folder.startswith(path.rstrip("/") + "/"):
+                return True
+    for _, text, cwd in created:
+        if _unresolved(text) or (cwd is None and not text.startswith("/")):
+            return True
+        if fnmatch.fnmatchcase(target, posixpath.normpath(posixpath.join(cwd or "/", text))):
+            return True
     for copy in copies:
         if copy.error:
             return True  # ADD or a COPY that isn't read: what it puts in the image isn't known
@@ -2392,6 +2436,20 @@ _UV_HARMLESS_ENV = frozenset(
     "UV_NO_INSTALL_WORKSPACE UV_NO_INSTALL_LOCAL UV_NO_EDITABLE UV_PROJECT_ENVIRONMENT UV_SYSTEM_PYTHON "
     "UV_SYSTEM_CERTS UV_VERSION".split()
 )
+# `git clone` options that take the next word as their value, and those that take none (git's builtin/clone.c,
+# up to --revision; a short option may also carry its value attached, as in `-bmain`).
+_GIT_CLONE_VALUED = frozenset(
+    "-b --branch -o --origin --depth -c --config --reference --reference-if-able -j --jobs --filter --template "
+    "--separate-git-dir -u --upload-pack --shallow-since --shallow-exclude --server-option --bundle-uri --revision "
+    "--ref-format".split()
+)
+_GIT_CLONE_SWITCHES = frozenset(
+    "-v --verbose -q --quiet --progress --no-progress --reject-shallow --no-reject-shallow -n --no-checkout --checkout "
+    "--bare --mirror -l --local --no-local --no-hardlinks --hardlinks -s --shared --no-shared --dissociate "
+    "--single-branch --no-single-branch --no-tags --tags --shallow-submodules --no-shallow-submodules "
+    "--recurse-submodules --no-recurse-submodules --recursive --also-filter-submodules --remote-submodules "
+    "--no-remote-submodules --sparse --no-sparse -4 --ipv4 -6 --ipv6".split()
+)
 # The values uv takes for the settings above that take a fixed kind of value: a value outside it makes uv exit 2 on
 # the command that reads it (or, for a concurrency limit past the largest permit count, crash), so such a line is
 # refused, on a uv command only (pip doesn't read UV_ variables). Each rule is (pattern, what uv takes, largest number
@@ -2811,6 +2869,8 @@ class _RunReader:
                         "can't tell what is installed"
                     )
             self.report.warn(number, "a heredoc script")
+            # What the script writes isn't known: a later local npm install may find a package.json it made.
+            self.mentions.append((number, "$(heredoc)", None))
             return []
         else:
             parser = _Shell(rest, env, bash)
@@ -3013,6 +3073,8 @@ class _RunReader:
                 if words and (folder := self._writes_folder(words)):
                     written.append(folder if folder.startswith("/") or cwd is not None else "/")
                     anywhere = folder == "/"  # git: any file of the work tree, which the config check leaves out
+                elif words and (folder := self._clone_folder(words)):
+                    written.append(folder)  # the clone's folder, which its URL alone doesn't name
             self.mentions += [(number, text, cwd) for text in written]
             if first in ("mkdir", "touch", "ln", "install"):
                 self.created += [(number, word.text, cwd) for word in words[1:] if not word.text.startswith("-")]
@@ -3117,6 +3179,52 @@ class _RunReader:
             if rest and rest[0] in _GIT_WRITES:
                 return "/"
         return None
+
+    @staticmethod
+    def _clone_folder(words: list[_Word]) -> str | None:
+        """The folder `git clone REPO [DIR]` makes: DIR, or the repository's name from REPO (`.git` dropped), under
+        the `-C` folder if one is given."""
+        if posixpath.basename(words[0].text) != "git":
+            return None
+        texts = [word.text for word in words[1:]]
+        base = None
+        while texts and texts[0].startswith("-"):
+            if texts[0] in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env") and len(texts) > 1:
+                base = (posixpath.join(base, texts[1]) if base else texts[1]) if texts[0] == "-C" else base
+                texts = texts[2:]
+            else:
+                if texts[0].startswith("-C") and len(texts[0]) > 2:  # `-C/srv`: the folder attached
+                    base = posixpath.join(base, texts[0][2:]) if base else texts[0][2:]
+                texts = texts[1:]
+        if not texts or texts[0] != "clone":
+            return None
+        positional: list[str] = []
+        rest = texts[1:]
+        while rest:
+            text, rest = rest[0], rest[1:]
+            if text == "--":
+                positional += rest
+                break
+            if text in _GIT_CLONE_VALUED:
+                rest = rest[1:]
+            elif (text.startswith("--") and "=" in text) or text in _GIT_CLONE_SWITCHES:
+                continue
+            elif not text.startswith("--") and text[:2] in _GIT_CLONE_VALUED:
+                continue  # `-bmain`, `-j4`: the value attached
+            elif text.startswith("-"):
+                # An option wheelgap doesn't know (or an abbreviation, or short options run together) may take the
+                # next word as its value, so which word is the folder isn't known.
+                return "$(git clone)"
+            else:
+                positional.append(text)
+        if not positional:
+            return None
+        if len(positional) > 1:
+            folder = positional[1]
+        else:
+            name = posixpath.basename(positional[0].rstrip("/").rpartition(":")[2] or positional[0])
+            folder = name.removesuffix(".git") or "."
+        return posixpath.join(base, folder) if base and not folder.startswith("/") else folder
 
     def _path_entry(self, value: str, where: str, cwd: str | None = "/") -> tuple[str, str] | None:
         """What a bare pip, python or uv is once PATH is `value` (see self.path)."""
@@ -3351,7 +3459,9 @@ class _RunReader:
             # Without an explicit prefix npm's project is the nearest folder up the tree with a package.json, so
             # one in any folder above the working folder is the project's own code too.
             folders = [folder] if explicit else list(_up_the_tree(folder))
-            empty = not any(_may_carry_package_json(self.copies, self.dirs, each) for each in folders)
+            empty = not any(
+                _may_carry_package_json(self.copies, self.dirs, each, self.mentions, self.created) for each in folders
+            )
         if spelling := _project_script(base, texts, stdin, empty):
             return "project-scripts", (spelling, shown)
         if base in _PROGRAMS:
