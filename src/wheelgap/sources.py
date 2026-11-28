@@ -214,6 +214,8 @@ class Source:
     # graph remains untouched, preserving conservative behavior when no selectors are supplied.
     uv_packages: list[dict] | None = None
     uv_manifest: dict = field(default_factory=dict)
+    # uv.lock only: its [options] table (exclude-newer and the rest, as uv locked with them), for --fix (#822).
+    uv_options: object = None
     uv_pyproject: Path | None = None
     # A script's lock (example.py.lock, from uv lock --script): the script's path, as the lock's was given. uv takes
     # no dependency groups for it from a pyproject.toml beside it, so uv_pyproject is None; --fix's config goes in the
@@ -313,6 +315,9 @@ class Source:
     deps_paths: dict[Target, dict[int, list[str]]] | None = None
     # --deps: all distinct direct requirements that reach each transitive package, per target.
     deps_direct: dict[Target, dict[int, tuple[str, ...]]] | None = None
+    # --deps: per target, the specifier each other package in the tree puts on each package, with that package's name,
+    # for --fix to name the one that rules an upgrade out (#821).
+    deps_imposed: dict[Target, dict[int, list[tuple[str, str]]]] | None = None
 
     def cutoff_for(self, key: str) -> datetime | None:
         """The upload cutoff uv applies to this package: its exclude-newer-package entry, else exclude-newer."""
@@ -1047,6 +1052,7 @@ def parse_uv_lock(path: Path) -> Source:
     members = {canonicalize_name(m) for m in manifest.get("members", [])}
     edges: dict[int, list[Edge]] = {}
     source = Source(path.name, edges=edges, uv_packages=data.get("package", []), uv_manifest=manifest)
+    source.uv_options = data.get("options")
     if path.name.endswith(".py.lock"):
         source.uv_script = str(path).removesuffix(".lock")  # as given, so --fix's `uv lock --script` runs from here
     else:

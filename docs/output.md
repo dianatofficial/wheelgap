@@ -488,12 +488,17 @@ never changes a status, the summary or the exit code.
 With `--json --fix`, each package also gets `fix`: an object keyed by its gap target labels whose
 values have `kind` and that kind's keys:
 
-- `"upgrade"`: `version` (the release), `how` (what to run or change), `constraint` (`null`, or `file`,
+- `"upgrade"`: `version` (the release), `prerelease` (whether it's a pre-release, named only for a pre-release pin
+  when no one final release fits every target), `exclude_newer` (`null`, or `setting`, `cutoff`, `span` and `move_past` when the
+  release was uploaded after uv's exclude-newer, so the cutoff must move past `move_past` first; for a duration such
+  as `850 days`, `span` is the duration and `cutoff` is `null`, since the time it gives moves every run), `how` (what to run or change), `constraint` (`null`, or `file`,
   `requirements`, `allows` and `via`: your own requirement, or `-c` constraint, and whether the release fits it) and
   `gap_wheel` (the fallback:
   `null`, or `wheel`, `url`, `sha256` and `unofficial: true`);
 - `"gap_wheel"`: `wheel`, `url`, `sha256` and `unofficial: true`;
-- `"none"`: `reason` (`no_newer_release`, `loses_wheel`, `uv_may_fork`, `not_looked_up` or `no_binary`) and
+- `"none"`: `reason` (`no_newer_release`, `loses_wheel`, `uv_may_fork`, `not_looked_up`, `no_binary` or, with
+  `--deps`, `held_back`: another package in the resolved tree requires a range that rules out the newer release
+  with the wheel) and
   `abi3_only`.
 
 The top-level `fix_summary` counts them: `{"gaps": 6, "upgrade": 4, "gap_wheel": 2, "none": 0, "not_looked_up": 0,
