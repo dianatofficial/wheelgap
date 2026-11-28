@@ -395,6 +395,8 @@ A project tag like `cp313` still checks every `-t` platform, so pass the targets
 interpreter you built with. Missing-wheel targets land as `source` (the sdist builds) or `missing` (no sdist); the
 dropped-target lines are what makes a release pipeline fail.
 
+Moving to a Rust extension? See [Rust extensions](rust-extensions.md) for the wheel matrix to build before this check.
+
 ## Other CI systems
 
 - **Jenkins, Azure Pipelines, CircleCI:** publish the `--junit PATH` file with their JUnit test report step.
