@@ -1224,7 +1224,9 @@ def test_fix_names_the_parent_for_a_dependency_instead_of_a_pin(index, capsys):
     assert main(["holder==1.0", *FIX, "--json"]) == 1
     data = json.loads(capsys.readouterr().out)
     held = next(p for p in data["packages"] if p["name"] == "held")
-    assert held["fix"] == {"win-arm64": {"kind": "none", "reason": "held_back", "abi3_only": False}}
+    assert held["fix"] == {
+        "win-arm64": {"kind": "none", "reason": "held_back", "abi3_only": False, "build_packages": None}
+    }
     assert data["fix_summary"]["none"] == 1 and data["fix_summary"]["upgrade"] == 0
 
 

@@ -311,8 +311,9 @@ def make_parser() -> argparse.ArgumentParser:
         "--build-info",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="with --explain, read the sdist of each package that builds from source to say what the build needs "
-        "(downloads them from PyPI; also build-info = true; --no-build-info overrides build-info = true)",
+        help="with --explain, read the sdist of each package that builds from source to say what the build needs, "
+        "and with --fix, the distro packages to install to build a gap with no fix on a Linux target (downloads "
+        "them from PyPI; also build-info = true; --no-build-info overrides build-info = true)",
     )
     p.add_argument(
         "--conda-forge",
@@ -3314,20 +3315,27 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     build_info: dict[int, BuildInfo] | None = None  # None: not asked for
     off_by = origin.other_index(index_url) or origin.index_env()  # no package counts as PyPI's for sure
     want_build_info = args.build_info if args.build_info is not None else config.get("build-info", False)
-    if args.explain and want_build_info and not offline and off_by:
+    build_asked = (args.explain or args.fix) and want_build_info and not offline  # --explain's needs, --fix's packages
+    look_up_build = build_asked and not off_by
+    if build_asked and off_by:
         if not quiet:
             note = f"wheelgap: note: --build-info is off: packages may come from another index ({off_by})"
             print(Style(use_color(args.color)).dim(note), file=sys.stderr)
-    elif args.explain and want_build_info and not offline:
-        # What each explained `source` release needs to build, from its sdist (only for packages positively from
+
+    def build_lookups(rows: list[Row]) -> dict[int, BuildInfo]:
+        # What each `source` release among `rows` needs to build, from its sdist (only for packages positively from
         # PyPI: see build.where). Nothing here changes the exit code, and a release whose sdist gives no answer just
         # gets no line.
         source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
-        wanted = [(r.package, source_of[id(r.package)]) for r in gaps if source_targets(r, targets)]
+        wanted = [(r.package, source_of[id(r.package)]) for r in rows if source_targets(r, targets)]
         private = origin.private_names(sources, simple_index=index_url)
-        build_info, stopped = lookup_all(wanted, simple_index=index_url, private=private, **cached)
+        found, stopped = lookup_all(wanted, simple_index=index_url, private=private, **cached)
         if stopped is not None and not quiet:
             print(Style(use_color(args.color)).dim(f"wheelgap: note: {stopped}"), file=sys.stderr)
+        return found
+
+    if look_up_build and args.explain:  # --explain explains every `source` gap
+        build_info = build_lookups(gaps)
 
     # None: not asked for. Like --suggest, it never changes a status or the exit code.
     fills = (
@@ -3352,6 +3360,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             upgrades, unlooked = release_lookups(gaps, targets, sources, index_url, quiet, flag="--fix")
         source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
         fix_cells = fix.plan(gaps, targets, source_of, upgrades, fills or [], unlooked)
+        if look_up_build and build_info is None:  # --fix alone: only the sdists of gaps with no fix (#814)
+            build_info = build_lookups(fix.buildable_rows(fix_cells))
+        if build_info:
+            fix_cells = fix.with_build(fix_cells, build_info)
     # The hint never makes a request: it reads only the list a --fix run left in the cache (kept for
     # cache.GAP_WHEELS_MAX_AGE), and only when a gap could use it. No hint when that list fills nothing; that is
     # silence, not "nothing fits": --fix itself fetches the list again before it says so (gap_wheel_fills).
