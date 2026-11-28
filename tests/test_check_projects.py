@@ -696,6 +696,7 @@ def test_report_keeps_target_level_cells_out_of_the_rate(capsys):
     assert script.report(cells, versions, 1.0) == 0
     out = capsys.readouterr().out
     assert "1 cells: 1 compared, 1 agree, 0 disagree (100.00% agree), 0 not compared" in out
+    assert "0 not compared; 2 target-level cells outside the rate (1 not compared)." in out
     assert "Target-level cells (not in the rate): 2" in out
     assert "Input × targets with a package compared: 1 of 3 (66.7% excluded)" in out
     assert "Nothing compared: o/q" in out
@@ -703,6 +704,49 @@ def test_report_keeps_target_level_cells_out_of_the_rate(capsys):
     assert data["totals"]["uv.lock vs uv sync (all)"]["cells"] == 1
     assert data["target_level"]["uv.lock vs uv sync (all)"]["cells"] == 2
     assert data["coverage"]["uv.lock vs uv sync (all)"]["inputs_with_nothing_compared"] == ["o/q"]
+
+
+def test_report_counts_target_level_cells_for_no_referee_inputs(capsys):
+    """poetry.lock has no referee: every cell is target-level and not compared.
+
+    The summary line must not say "0 cells" while the reason list below it shows
+    all of those cells as not compared (#797).
+    """
+    why = "no referee: Poetry can't install for another platform, and it isn't run on untrusted projects here"
+    cells = [
+        script.Cell("o/p", "poetry.lock", "-", "all", label, "*", "-", "-", "not compared", why)
+        for label in ("3.11 linux-x86_64", "3.12 linux-x86_64", "3.13 linux-x86_64")
+    ]
+    versions = {"uv": "uv", "pip": "pip", "wheelgap": "0", "wheelgap_commit": "abc", "checkout_head": "def"}
+    assert script.report(cells, versions, 1.0) == 0
+    out = capsys.readouterr().out
+    assert (
+        "0 cells: 0 compared, 0 agree, 0 disagree (n/a agree), 0 not compared; "
+        "3 target-level cells outside the rate (3 not compared)." in out
+    )
+    assert "Not compared, by reason:" in out
+    assert f"       3  {why}" in out
+
+
+def test_check_repo_summary_counts_target_level_cells(monkeypatch):
+    import io
+
+    why = "no referee: Poetry can't install for another platform, and it isn't run on untrusted projects here"
+    cells = [
+        script.Cell("org/demo", "poetry.lock", "-", "all", "3.13 linux-x86_64", "*", "-", "-", "not compared", why)
+    ]
+    entry = {"id": "org/demo", "kind": "poetry.lock", "main": "poetry.lock"}
+    monkeypatch.setattr(script, "resolve_repo_commit", lambda repo, ref, fetch: "b" * 40)
+    monkeypatch.setattr(script, "fetch_repo_corpus", lambda repo, sha, corpus_dir, fetch: {"inputs": [entry]})
+    monkeypatch.setattr(script, "check_input", lambda *args, **kwargs: cells)
+    out = io.StringIO()
+    versions = {"uv": "0.6.0", "pip": "25.0", "wheelgap": "0.14.0", "wheelgap_commit": "0" * 40}
+    code = script.check_repo("org/demo", target_names=["3.13 linux-x86_64"], versions=versions, out=out)
+    assert code == 0
+    assert (
+        "Summary: 0 compared, 0 agreed, 0 disagreed, 0 not compared; "
+        "1 target-level cells outside the rate (1 not compared)." in out.getvalue()
+    )
 
 
 def test_cache_key_covers_what_changes_an_answer(tmp_path):

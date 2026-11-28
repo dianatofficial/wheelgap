@@ -1895,12 +1895,20 @@ def report(cells: Sequence[Cell], versions: dict[str, str], seconds: float, out=
         t = totals(group)
         rate = "n/a" if t["agreement"] is None else f"{t['agreement']:.2%}"
         inputs = len({c.input for c in whole})
+        level = target_cells(whole)
+        # An input can consist entirely of target-level cells (poetry.lock has no
+        # referee, so every cell is `*`). The summary must account for those cells
+        # even though they stay out of the agreement rate, otherwise it says
+        # "0 cells" directly above a list of dozens of not-compared cells.
+        level_note = ""
+        if level:
+            level_not_compared = sum(c.verdict == NOT_COMPARED for c in level)
+            level_note = f"; {len(level)} target-level cells outside the rate ({level_not_compared} not compared)"
         print(
             f"\n{name}: {inputs} inputs, {t['cells']} cells: {t['compared']} compared, {t['agree']} agree, "
-            f"{t['disagree']} disagree ({rate} agree), {t['not_compared']} not compared.",
+            f"{t['disagree']} disagree ({rate} agree), {t['not_compared']} not compared{level_note}.",
             file=out,
         )
-        level = target_cells(whole)
         if level:
             reasons = Counter(f"{c.verdict}: {c.why}" for c in level)
             print(f"  Target-level cells (not in the rate): {len(level)}", file=out)
@@ -2118,13 +2126,17 @@ def check_repo(
             entries[(entry["id"], entry["kind"])] = entry
             cells += check_input(entry, targets, out_dir, versions, run, workers, own_python)
         summary = totals(package_cells(cells))
+        level = target_cells(cells)
+        level_note = ""
+        if level:  # e.g. poetry.lock, whose cells are all target-level (no referee)
+            level_not_compared = sum(c.verdict == NOT_COMPARED for c in level)
+            level_note = f"; {len(level)} target-level cells outside the rate ({level_not_compared} not compared)"
         print(f"Repo: {repo} @ {sha}", file=out)
         print(
             f"Summary: {summary['compared']} compared, {summary['agree']} agreed, "
-            f"{summary['disagree']} disagreed, {summary['not_compared']} not compared.",
+            f"{summary['disagree']} disagreed, {summary['not_compared']} not compared{level_note}.",
             file=out,
         )
-        level = target_cells(cells)
         for cell in level:
             if cell.verdict != AGREE:
                 print(f"Target-level ({cell.kind}, {cell.mode}, {cell.target}): {cell.verdict}: {cell.why}", file=out)
