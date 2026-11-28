@@ -241,7 +241,7 @@ def _requirement_lines(
                 if include:
                     is_constraint, target = include
                     if is_constraint and ("://" in target or "${" in target):
-                        continue  # the parser leaves these constraints unread
+                        return None  # the parser refuses these constraints
                     # -r means requirements even inside a constraints file; track each file in both roles.
                     included = _requirement_lines(path.parent / target, seen, is_constraint, stack)
                     if included is None:
@@ -342,7 +342,14 @@ class Locator:
                     return {}  # a spec the scan and the parser can't agree on: no line is safe
             else:
                 expected = [(p.key, p.markers) for p in source.packages if not p.skip]
-            if [(p.key, p.markers) for p, _, _ in scanned] != expected:
+            # A name required twice is merged by the parser (sources._merge_requirements: one package per marker, or a
+            # MarkerGroup's packages), so those names are compared as a set; locate gives such a package a line only
+            # if exactly one line has its markers.
+            names = [p.key for p, _, _ in scanned]
+            twice = {key for key in names if names.count(key) > 1}
+            if {key for key, _ in expected} != set(names) or [
+                (p.key, p.markers) for p, _, _ in scanned if p.key not in twice
+            ] != [entry for entry in expected if entry[0] not in twice]:
                 return {}
             by_name: dict[str, list[tuple[Package, Path, int | None]]] = {}
             for package, file, number in scanned:
