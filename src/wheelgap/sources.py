@@ -207,7 +207,7 @@ class DirectoryInput:
 class Source:
     label: str
     packages: list[Package] = field(default_factory=list)
-    # uv.lock only: which packages each package depends on, and where the walk starts.
+    # Lockfile dependency graphs: which packages each package depends on, and where the walk starts.
     # When set, a package applies to a target only if it's reachable along edges whose markers hold.
     edges: dict[int, list[Edge]] | None = None
     roots: list[int] = field(default_factory=list)
@@ -1622,13 +1622,18 @@ def parse_poetry_lock(path: Path) -> Source:
         pkgs.append(pkg)
     # With markers on edges only, walk the graph from the packages nothing depends on, as for uv.lock.
     if edge_markers_only and pkgs:
-        roots = set(_graph_roots(pkgs, edges))
-        # The project's own dependencies are roots too, even if another package also depends on them
-        # under a marker (colorama directly, and via click only on Windows).
         pyproject = path.parent / "pyproject.toml"
         declared = _project_dependencies(pyproject)
-        roots |= {i for i, p in enumerate(pkgs) if p.key in (declared or ())}
-        source = Source(path.name, pkgs, edges=edges, roots=sorted(roots), poetry_tables=data.get("package", []))
+        # The project's own dependencies enter the graph through edges that keep their markers and Python
+        # restrictions, as the lock's own edges do (colorama directly only on Windows, #836).
+        source = Source(
+            path.name,
+            pkgs,
+            edges=edges,
+            roots=_graph_roots(pkgs, edges, declared or ()),
+            root_edges=declared or [],
+            poetry_tables=data.get("package", []),
+        )
         if not declared:
             # Without them, a direct dependency that another package needs only under a marker would be hidden
             # wherever the marker is false: check() makes such a package `unknown` where it would have a gap (#815).
@@ -1649,7 +1654,7 @@ def parse_poetry_lock(path: Path) -> Source:
     )
 
 
-def _graph_roots(pkgs: list[Package], edges: dict[int, list[Edge]]) -> list[int]:
+def _graph_roots(pkgs: list[Package], edges: dict[int, list[Edge]], root_edges: Iterable[Edge] = ()) -> list[int]:
     """Where to start walking a lock that doesn't record its project: every package in a group of
     packages (a strongly connected component, usually just one package) that nothing outside the group
     depends on. That covers dependency cycles such as sphinx <-> sphinxcontrib-*, which no package
@@ -1663,6 +1668,8 @@ def _graph_roots(pkgs: list[Package], edges: dict[int, list[Edge]]) -> list[int]
     }
     comp = _components(len(pkgs), succ)
     has_outside_parent = {comp[j] for i in succ for j in succ[i] if comp[i] != comp[j]}
+    # A declared dependency enters its entire component through the project's conditional edge, not an inferred root.
+    has_outside_parent.update(comp[j] for name, *_ in root_edges for j in by_name.get(canonicalize_name(name), []))
     return [i for i in range(len(pkgs)) if comp[i] not in has_outside_parent]
 
 
@@ -1707,9 +1714,10 @@ def _components(n: int, succ: dict[int, list[int]]) -> list[int]:
     return comp
 
 
-def _project_dependencies(pyproject: Path) -> set[str] | None:
-    """Names a project declares itself (PEP 621 and Poetry tables), to use as roots for poetry.lock, or None when
-    the pyproject.toml is missing or isn't UTF-8 TOML. Odd values in a readable one are left out, never an error."""
+def _project_dependencies(pyproject: Path) -> list[Edge] | None:
+    """Dependencies a project declares itself (PEP 621 and Poetry tables), as edges that keep their markers and Python
+    restrictions, to seed a Poetry 1.x walk; or None when the pyproject.toml is missing or isn't UTF-8 TOML. Odd values
+    in a readable one are left out, never an error."""
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8-sig"))
     except Exception:
@@ -1727,17 +1735,63 @@ def _project_dependencies(pyproject: Path) -> set[str] | None:
         specs += strings(extra)
     for group in table(data.get("dependency-groups")).values():
         specs += strings(group)
-    names: set[str] = set()
+    edges: list[Edge] = []
     for spec in specs:
         try:
-            names.add(canonicalize_name(Requirement(spec).name))
+            req = Requirement(spec)
+            edges.append((req.name, str(req.specifier) or None, str(req.marker) if req.marker else None, None))
         except InvalidRequirement:
             continue
     poetry = table(table(data.get("tool")).get("poetry"))
     tables = [table(poetry.get("dependencies")), table(poetry.get("dev-dependencies"))]
     tables += [table(table(g).get("dependencies")) for g in table(poetry.get("group")).values()]
-    names |= {canonicalize_name(name) for t in tables for name in t if name.lower() != "python"}
-    return names
+    for t in tables:
+        for name, spec in t.items():
+            if name.lower() == "python":
+                continue
+            for variant in spec if isinstance(spec, list) else [spec]:
+                entry = table(variant)
+                marker = entry.get("markers")
+                if marker is not None and not isinstance(marker, str):
+                    marker = "unreadable Poetry marker"
+                python = entry.get("python", "*")
+                if python != "*":
+                    try:
+                        constraint = SpecifierSet(_poetry_python_specifier(python))
+                        python_marker = " and ".join(
+                            f'python_full_version {clause.operator} "{clause.version}"' for clause in constraint
+                        )
+                    except (InvalidSpecifier, TypeError):
+                        python_marker = "unsupported Poetry Python constraint"
+                    marker = f"({marker}) and ({python_marker})" if marker else python_marker
+                version = entry.get("version") if entry else variant
+                edges.append((name, version if isinstance(version, str) and version != "*" else None, marker, None))
+    return edges
+
+
+_POETRY_PYTHON = re.compile(r"\s*([\^~]?)\s*(\d+(?:\.\d+){0,2})\s*")
+
+
+def _poetry_python_specifier(text: str) -> str:
+    """A dependency's Poetry `python` constraint as PEP 440, for the caret, tilde and bare-version forms that aren't
+    PEP 440 (poetry-core 2.x's parse_single_constraint in src/poetry/core/constraints/version/parser.py, turned into a
+    marker by create_nested_marker): `^3.12` is `>=3.12,<4.0`, `~3.12` is `>=3.12,<3.13`, `~3` is `>=3,<4.0`, a bare
+    `3.12` is `python_version == "3.12"`, so `==3.12.*`, and a bare `3.12.1` is `==3.12.1`. Anything else, including
+    a caret on major 0 and a bare major version, comes back unchanged, to be read as PEP 440 or be `unknown`."""
+    m = _POETRY_PYTHON.fullmatch(text) if isinstance(text, str) else None
+    if m is None:
+        return text
+    op, version = m.groups()
+    parts = [int(x) for x in version.split(".")]
+    if (op == "^" and parts[0] > 0) or (op == "~" and len(parts) == 1):
+        return f">={version},<{parts[0] + 1}.0"
+    if op == "~":
+        return f">={version},<{parts[0]}.{parts[1] + 1}"
+    if not op and len(parts) == 2:
+        return f"=={version}.*"
+    if not op and len(parts) == 3:
+        return f"=={version}"
+    return text
 
 
 def _version_tuple(text: str) -> tuple[int, ...]:

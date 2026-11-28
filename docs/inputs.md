@@ -286,13 +286,24 @@ as `private index`.
 
 **Lock versions before 2.1** (all of Poetry 1.x) record markers only on dependency edges, so wheelgap walks the
 dependency graph from the packages nothing depends on and from the dependencies declared in the `pyproject.toml`
-next to the lock. Without a `pyproject.toml` there that declares them (none, one that can't be read, or one with no
-dependencies at all), wheelgap can't tell a direct dependency that another package needs only under a marker
-(`colorama`, which `click` needs on Windows only) from one installed only under that marker, and Poetry installs a
-direct dependency everywhere. So a package that no dependency installs on a target, and that has no wheel there, is
-`unknown` on that target rather than `n/a`, unless another version of it is installed there. `--explain` and
-`unknown_reasons` in `--json` say why, and a note on stderr names the packages. It counts as any `unknown` does, and
-`--ignore` takes it; where a left-out package has a wheel anyway, the answer is the same either way and nothing changes.
+next to the lock. Direct dependencies retain their environment markers and PEP 440 `python` restrictions from
+`pyproject.toml`, including alternative entries and dependency groups. A dependency excluded on a target is `n/a`;
+when it is installed only through a project dependency whose condition the target can't decide (a patch-level
+Python restriction such as `>=3.12.4` on 3.12, `platform_release`), and it has no wheel there, it is `unknown`, with
+the reason under `--explain` and in `unknown_reasons` in `--json`. Poetry's `^3.12`, `~3.12` and bare `3.12` Python
+constraints are read as `>=3.12,<4.0`, `>=3.12,<3.13` and `==3.12.*`; any other Poetry-only constraint is `unknown`.
+An unconditional path to the same package still counts normally, and the lock's own `extra` edges are followed as
+installed.
+
+Without a `pyproject.toml` beside the lock that declares the project's dependencies (none, one that can't be read, or
+one with no dependencies at all), wheelgap can't tell a direct dependency that another package needs only under a
+marker (`colorama`, which `click` needs on Windows only) from one installed only under that marker, and Poetry
+installs a direct dependency wherever its own conditions hold. So a package that
+no dependency installs on a target, and that has no wheel there, is `unknown` on that target rather than `n/a`, unless
+another version of it is installed there. `--explain` and `unknown_reasons` in `--json` say why, and a note on stderr
+names the packages. It counts as any `unknown` does, and `--ignore` takes it; where a left-out package has a wheel
+anyway, the answer is the same either way and nothing changes.
+
 `--explain` shows the dependency path for these locks. `python-versions` isn't applied to them: the
 lock doesn't say which Pythons a direct dependency is installed for (`numpy = [{version = "1.26.4", python = "<3.13"},
 ...]` is only in `pyproject.toml`), so the range would report a pin as `missing` on a Python Poetry never installs it
