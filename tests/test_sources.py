@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from wheelgap import pypi, sources
-from wheelgap.check import Status, check
+from wheelgap.check import Status, check, poetry_roots_note
 from wheelgap.sources import (
     Source,
     SourceError,
@@ -126,6 +126,68 @@ def test_uv_lock_manifest_that_is_not_a_table_raises(tmp_path):
     (tmp_path / "uv.lock").write_text("version = 1\nmanifest = 5\n", encoding="utf-8")
     with pytest.raises(SourceError, match=re.escape("uv.lock: `manifest` isn't a table")):
         load_inputs([str(tmp_path)])
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "expected"),
+    [
+        ("uv.lock", "package = 1\n", "uv.lock: `package` isn't a list of tables"),
+        ("uv.lock", 'package = "x"\n', "uv.lock: `package` isn't a list of tables"),
+        ("uv.lock", "[manifest]\nmembers = 1\n", "uv.lock: the manifest has a `members` that isn't a list of strings"),
+        (
+            "uv.lock",
+            '[[package]]\nname = "a"\nversion = "1.0"\nwheels = ["x"]\n',
+            "uv.lock: package a: has a file entry that isn't a table",
+        ),
+        (
+            "uv.lock",
+            "[manifest]\nmembers = [1]\n",
+            "uv.lock: the manifest has a `members` that isn't a list of strings",
+        ),
+        (
+            "uv.lock",
+            '[[package]]\nname = "a"\nversion = "1.0"\nsource = "x"\n',
+            "uv.lock: package a: `source` isn't a table",
+        ),
+        (
+            "uv.lock",
+            '[[package]]\nname = "a"\nversion = "1.0"\nwheels = "x"\n',
+            "uv.lock: package a: `wheels` isn't a list",
+        ),
+        (
+            "uv.lock",
+            '[[package]]\nname = "a"\nversion = "1.0"\nsdist = "a-1.0.tar.gz"\n',
+            "uv.lock: package a: has a file entry that isn't a table",
+        ),
+        ("uv.lock", "not = valid = toml\n", "uv.lock: invalid TOML:"),
+        ("pylock.toml", "packages = -1\n", "pylock.toml: `packages` isn't a list of tables"),
+        ("pylock.toml", "packages = [1]\n", "pylock.toml: `packages` isn't a list of tables"),
+        (
+            "pylock.toml",
+            '[[packages]]\nname = "a"\nversion = "1.0"\nwheels = [true]\n',
+            "pylock.toml: package a: has a file entry that isn't a table",
+        ),
+        (
+            "pylock.toml",
+            '[[packages]]\nname = "a"\nversion = "1.0"\nwheels = "x"\n',
+            "pylock.toml: package a: `wheels` isn't a list",
+        ),
+        ("pylock.toml", "not = valid = toml\n", "pylock.toml: invalid TOML:"),
+    ],
+)
+def test_uv_lock_and_pylock_reject_wrong_types_and_invalid_toml(tmp_path, filename, content, expected):
+    path = tmp_path / filename
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(SourceError, match=re.escape(expected)):
+        load_inputs([str(path)])
+
+
+@pytest.mark.parametrize("filename", ["uv.lock", "pylock.toml"])
+def test_uv_lock_and_pylock_reject_non_utf8(tmp_path, filename):
+    path = tmp_path / filename
+    path.write_bytes(b'version = 1\nname = "\xff"\n')
+    with pytest.raises(SourceError, match=re.escape(f"{filename}: isn't UTF-8 (byte 20), so it can't be read")):
+        load_inputs([str(path)])
 
 
 def test_uv_lock_dependency_extra_may_be_a_list(tmp_path):
@@ -423,10 +485,11 @@ def test_requirements_nested_includes_keep_their_kind(tmp_path):
     (tmp_path / "sub" / "deep" / "c3.txt").write_text("-r r3.txt\nfromc3<4\n", encoding="utf-8")
     (tmp_path / "sub" / "deep" / "r3.txt").write_text("fromr3==3.0\n", encoding="utf-8")
     src = parse_requirements(path)
+    # #826: origins name included files relative to the top input, so two same-named files stay distinct.
     assert [(p.name, p.version, p.origin) for p in src.packages] == [
-        ("fromr1", "1.0", "r1.txt"),
-        ("fromr3", "3.0", "r3.txt"),
-        ("fromr2", "2.0", "r2.txt"),
+        ("fromr1", "1.0", "sub/deep/r1.txt"),
+        ("fromr3", "3.0", "sub/deep/r3.txt"),
+        ("fromr2", "2.0", "sub/r2.txt"),
         ("topreq", None, "top.txt"),
     ]
     assert src.constraint_specs == {"fromc1": {"<2"}, "fromc2": {"<3"}, "fromc3": {"<4"}}
@@ -1045,7 +1108,7 @@ def test_requirements_include_after_other_options(tmp_path, line, target):
     path.write_text(f"{line}\nfastlib==2.0.0\n", encoding="utf-8")
     packages = parse_requirements(path).packages
     assert [(p.name, p.version, p.origin) for p in packages] == [
-        ("purewheel", "3.1", "base.txt"),
+        ("purewheel", "3.1", target),
         ("fastlib", "2.0.0", "requirements.txt"),
     ]
 
@@ -3215,3 +3278,222 @@ def test_requirements_tab_before_an_option_is_one_requirement_as_in_pip(tmp_path
     req.write_text("fastlib==2.0.0\t--no-binary fastlib\n", encoding="utf-8")
     with pytest.raises(SourceError, match="can't parse requirement"):
         parse_requirements(req)
+
+
+@pytest.mark.parametrize(
+    ("declaration", "pythons", "expected"),
+    [
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", markers = "platform_system == \\"Windows\\""}\n',
+            ["3.12"],
+            [Status.NOT_NEEDED, Status.SOURCE],
+        ),
+        (
+            '[project]\ndependencies = ["colorama; platform_system == \\"Windows\\""]\n',
+            ["3.12"],
+            [Status.NOT_NEEDED, Status.SOURCE],
+        ),
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", python = ">=3.13"}\n',
+            ["3.12", "3.13"],
+            [Status.NOT_NEEDED, Status.NOT_NEEDED, Status.SOURCE, Status.SOURCE],
+        ),
+        (
+            "[tool.poetry.dependencies]\n"
+            'colorama = {version = "*", python = ">=3.13", markers = "sys_platform == \\"win32\\""}\n',
+            ["3.12", "3.13"],
+            [Status.NOT_NEEDED, Status.NOT_NEEDED, Status.NOT_NEEDED, Status.SOURCE],
+        ),
+        (
+            "[tool.poetry.group.dev.dependencies]\n"
+            'colorama = {version = "*", markers = "sys_platform == \\"win32\\""}\n',
+            ["3.12"],
+            [Status.NOT_NEEDED, Status.SOURCE],
+        ),
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", markers = "platform_release == \\"6.1\\""}\n',
+            ["3.12"],
+            [Status.UNKNOWN, Status.UNKNOWN],
+        ),
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", python = ">=3.12.4"}\n',
+            ["3.12", "3.13"],
+            [Status.UNKNOWN, Status.UNKNOWN, Status.SOURCE, Status.SOURCE],
+        ),
+        # Poetry's own Python constraints, as poetry-core reads them (#838 review).
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", python = "^3.12"}\n',
+            ["3.11", "3.12"],
+            [Status.NOT_NEEDED, Status.NOT_NEEDED, Status.SOURCE, Status.SOURCE],
+        ),
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", python = "~3.12"}\n',
+            ["3.12", "3.13"],
+            [Status.SOURCE, Status.SOURCE, Status.NOT_NEEDED, Status.NOT_NEEDED],
+        ),
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", python = "3.13"}\n',
+            ["3.12", "3.13"],
+            [Status.NOT_NEEDED, Status.NOT_NEEDED, Status.SOURCE, Status.SOURCE],
+        ),
+        (
+            '[tool.poetry.dependencies]\ncolorama = {version = "*", python = "3.12 || 3.13"}\n',
+            ["3.12"],
+            [Status.UNKNOWN, Status.UNKNOWN],
+        ),
+    ],
+)
+def test_poetry_1x_direct_dependency_conditions(tmp_path, declaration, pythons, expected):
+    (tmp_path / "pyproject.toml").write_text(declaration, encoding="utf-8")
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "colorama"\nversion = "0.4.6"\n'
+        'files = [{file = "colorama-0.4.6.tar.gz"}]\n\n[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    targets = build_targets(pythons, ["linux-x86_64", "win-amd64"])
+    (row,) = check([src], targets)
+    assert [row.results[t] for t in targets] == expected
+
+
+def test_poetry_1x_undecided_direct_condition_is_explained_and_keeps_a_wheel(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry.dependencies]\ncolorama = {version = "*", markers = "platform_release == \\"6.1\\""}\n'
+        'app = {version = "*", markers = "platform_release == \\"6.1\\""}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "colorama"\nversion = "0.4.6"\n'
+        'files = [{file = "colorama-0.4.6-py2.py3-none-any.whl"}]\n\n'
+        '[[package]]\nname = "app"\nversion = "1"\nfiles = [{file = "app-1.tar.gz"}]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    # A second lock without its pyproject.toml (#815): its note names only its own left-out package.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "poetry.lock").write_text(
+        '[[package]]\nname = "click"\nversion = "8.1.7"\nfiles = [{file = "click-8.1.7-py3-none-any.whl"}]\n\n'
+        '[package.dependencies]\npywin32 = {version = "*", markers = "sys_platform == \\"win32\\""}\n\n'
+        '[[package]]\nname = "pywin32"\nversion = "306"\nfiles = [{file = "pywin32-306.tar.gz"}]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    srcs = load_inputs([str(tmp_path / "poetry.lock"), str(other / "poetry.lock")])
+    (target,) = build_targets(["3.12"], ["linux-x86_64"])
+    found = check(srcs, [target])
+    rows = {r.package.name: r for r in found}
+    assert rows["colorama"].results[target] is Status.WHEEL  # a wheel either way
+    assert not rows["colorama"].unknown_reasons
+    assert rows["app"].results[target] is Status.UNKNOWN
+    assert "can't decide" in rows["app"].unknown_reasons[target]
+    assert rows["pywin32"].results[target] is Status.UNKNOWN
+    note = poetry_roots_note(srcs, found)
+    assert note is not None and ": pywin32 is `unknown`" in note  # app isn't named
+
+
+def test_poetry_1x_conditional_root_still_follows_extra_edges_below_an_unconditional_one(tmp_path):
+    # Poetry 1.x writes an optional dependency as `markers = "extra == ..."`: it's in the lock because a package asked
+    # for the extra (notebook -> bleach[css] -> tinycss2), so it stays answered even though `extra` can't be decided.
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry.dependencies]\nnotebook = "*"\n'
+        'colorama = {version = "*", markers = "platform_release == \\"6.1\\""}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "notebook"\nversion = "6.5.7"\n'
+        'files = [{file = "notebook-6.5.7-py3-none-any.whl"}]\n\n'
+        '[package.dependencies]\nbleach = {version = "*", extras = ["css"]}\n\n'
+        '[[package]]\nname = "bleach"\nversion = "6.2.0"\nfiles = [{file = "bleach-6.2.0-py3-none-any.whl"}]\n\n'
+        "[package.dependencies]\n"
+        'tinycss2 = {version = ">=1.1.0,<1.5", optional = true, markers = "extra == \\"css\\""}\n\n'
+        '[package.extras]\ncss = ["tinycss2 (>=1.1.0,<1.5)"]\n\n'
+        '[[package]]\nname = "tinycss2"\nversion = "1.4.0"\nfiles = [{file = "tinycss2-1.4.0.tar.gz"}]\n\n'
+        '[[package]]\nname = "colorama"\nversion = "0.4.6"\nfiles = [{file = "colorama-0.4.6.tar.gz"}]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    (target,) = build_targets(["3.12"], ["linux-x86_64"])
+    rows = {r.package.name: r.results[target] for r in check([src], [target])}
+    assert rows["notebook"] is Status.WHEEL and rows["bleach"] is Status.WHEEL
+    assert rows["tinycss2"] is Status.SOURCE  # not unknown: the extra edge is followed as in the normal walk
+    assert rows["colorama"] is Status.UNKNOWN
+
+
+def test_poetry_1x_conditional_root_does_not_hide_another_dependency_path(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry.dependencies]\napp = "*"\n'
+        'colorama = {version = "*", markers = "platform_release == \\"6.1\\""}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "app"\nversion = "1"\nfiles = [{file = "app-1.tar.gz"}]\n'
+        '[package.dependencies]\ncolorama = "*"\n\n'
+        '[[package]]\nname = "colorama"\nversion = "0.4.6"\nfiles = [{file = "colorama-0.4.6.tar.gz"}]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    (target,) = build_targets(["3.12"], ["linux-x86_64"])
+    rows = {r.package.name: r.results[target] for r in check([src], [target])}
+    assert rows["colorama"] is Status.SOURCE
+
+
+def test_poetry_1x_conditional_root_keeps_its_dependency_cycle_conditional(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry.dependencies]\napp = {version = "*", markers = "sys_platform == \\"win32\\""}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "app"\nversion = "1"\nfiles = [{file = "app-1.tar.gz"}]\n'
+        '[package.dependencies]\nother = "*"\n\n'
+        '[[package]]\nname = "other"\nversion = "1"\nfiles = [{file = "other-1.tar.gz"}]\n[package.dependencies]\n'
+        'app = "*"\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    lin, win = build_targets(["3.12"], ["linux-x86_64", "win-amd64"])
+    rows = check([src], [lin, win])
+    assert all(r.results[lin] is Status.NOT_NEEDED and r.results[win] is Status.SOURCE for r in rows)
+
+
+def test_poetry_1x_direct_dependency_alternatives_pick_the_matching_version(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.poetry.dependencies]\ncolorama = [\n"
+        '  {version = "0.4.5", python = "<3.13"},\n'
+        '  {version = "0.4.6", python = ">=3.13"},\n]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text(
+        "".join(
+            f'[[package]]\nname = "colorama"\nversion = "{version}"\n'
+            f'files = [{{file = "colorama-{version}.tar.gz"}}]\n\n'
+            for version in ["0.4.5", "0.4.6"]
+        )
+        + '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    old, new = build_targets(["3.12", "3.13"], ["linux-x86_64"])
+    rows = {r.package.version: r.results for r in check([src], [old, new])}
+    assert rows["0.4.5"] == {old: Status.SOURCE, new: Status.NOT_NEEDED}
+    assert rows["0.4.6"] == {old: Status.NOT_NEEDED, new: Status.SOURCE}
+
+
+def test_poetry_1x_unknown_direct_condition_propagates_to_dependencies(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry.dependencies]\napp = {version = "*", markers = "platform_release == \\"6.1\\""}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text(
+        '[[package]]\nname = "app"\nversion = "1"\nfiles = [{file = "app-1.tar.gz"}]\n'
+        '[package.dependencies]\ncolorama = "*"\n\n'
+        '[[package]]\nname = "colorama"\nversion = "0.4.6"\nfiles = [{file = "colorama-0.4.6.tar.gz"}]\n\n'
+        '[metadata]\nlock-version = "1.1"\n',
+        encoding="utf-8",
+    )
+    (src,) = load_inputs([str(tmp_path)])
+    (target,) = build_targets(["3.12"], ["linux-x86_64"])
+    assert all(r.results[target] is Status.UNKNOWN for r in check([src], [target]))

@@ -15,6 +15,7 @@ are looked up. Like the rest of --fix, nothing here changes a status, the summar
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 from collections.abc import Callable
@@ -364,13 +365,25 @@ def constraint(cell: Cell) -> Constraint | None:
             same = written is not None and SpecifierSet(written) == SpecifierSet(pkg.spec)
         except InvalidSpecifier:
             same = False
-        specs, file = [written if same and written else pkg.spec], source.label
+        # A requirements file names the file whose line it is: a -r include's, not the top file's (#826).
+        file = _origin_file(pkg.origin, source) if source.kind == "requirements" else source.label
+        specs = [written if same and written else pkg.spec]
     else:
         return None
     if not specs:
         return None
     specs = [s for s in specs if s]  # a bare name bounds nothing
     return _judged(cell, specs, [f"{pkg.name}{s}" for s in specs], file, "requirement")
+
+
+def _origin_file(origin: str | None, source: Source) -> str:
+    """The requirements file whose line it is, as the source's label names files: the top file is the label itself
+    (a subfolder's is `svc/requirements.txt`), and an include's path, relative to the top file, sits in the label's
+    folder."""
+    if not origin or origin == "--deps" or (source.path is not None and origin == source.path.name):
+        return source.label  # the top file, or a --deps dependency, which has no line of its own
+    folder = posixpath.dirname(source.label)
+    return posixpath.normpath(posixpath.join(folder, origin)) if folder else origin
 
 
 def _judged(cell: Cell, specs: list[str], shown: list[str], file: str, via: str) -> Constraint | None:
@@ -632,8 +645,7 @@ def _how(source: Source, cells: list[Cell], code: Callable[[str], str] = _plain)
         # The file whose line pins it: a -r include's, not the top file's.
         by_file: dict[str, list[Cell]] = {}
         for c in cells:
-            origin = c.row.package.origin
-            by_file.setdefault(origin if origin and origin != "--deps" else source.label, []).append(c)
+            by_file.setdefault(_origin_file(c.row.package.origin, source), []).append(c)
         return [
             f"In {code(f)}, change the {_what(cs)} to {', '.join(map(code, _pins(cs)))}." for f, cs in by_file.items()
         ]
